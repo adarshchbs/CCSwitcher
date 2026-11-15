@@ -8,7 +8,7 @@ final class AccountStoreKeychainTests: XCTestCase {
 
     override func setUpWithError() throws {
         keychain = try TempKeychain()
-        store = AccountStore(service: "com.adarshchbs.ccswitcher.tests", keychain: try keychain.open())
+        store = AccountStore(service: "com.adarshchbs.ccswitcher.tests", keychain: try keychain.pin())
     }
 
     override func tearDownWithError() throws {

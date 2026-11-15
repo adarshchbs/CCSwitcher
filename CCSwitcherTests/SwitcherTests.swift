@@ -8,6 +8,8 @@ final class SwitcherTests: XCTestCase {
     private var config: FakeConfig!
     private var accounts: FakeAccounts!
     private var sessions = FakeSessions()
+    private var lookup: FakeLookup!
+    private var journal: FakeJournal!
 
     private var liveEnvelope: Data { Fixture.envelope(Fixture.oauth("team-live")) }
 
@@ -18,10 +20,13 @@ final class SwitcherTests: XCTestCase {
         store.items[Fixture.personal.id] = try Fixture.stored("personal", org: "org-personal")
         config = FakeConfig(Fixture.profile(org: "org-team"))
         accounts = FakeAccounts([Fixture.team, Fixture.personal])
+        lookup = FakeLookup()
+        journal = FakeJournal()
     }
 
     private func makeSwitcher() -> Switcher {
-        Switcher(item: item, store: store, config: config, accounts: accounts, sessions: sessions)
+        Switcher(item: item, store: store, config: config, accounts: accounts, sessions: sessions,
+                 lookup: lookup, clock: FixedClock(date: Fixture.now), journal: journal)
     }
 
     private func switchToPersonal(confirm: @escaping @Sendable ([LiveSession]) async -> Bool = { _ in true }) async throws -> SwitchOutcome {
@@ -55,6 +60,17 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(config.profile?.organizationUuid, "org-team", file: file, line: line)
     }
 
+    private func assertNothingChanged(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(item.writes.isEmpty, "item written", file: file, line: line)
+        XCTAssertEqual(store.writes, 0, "saved login written", file: file, line: line)
+        XCTAssertEqual(config.writes, 0, "profile written", file: file, line: line)
+        XCTAssertNil(journal.pending, file: file, line: line)
+    }
+
+    private func savedRecord(_ account: SavedAccount) throws -> SavedLoginRecord {
+        try SavedLoginRecord(decoding: XCTUnwrap(store.items[account.id]))
+    }
+
     // MARK: - Happy path
 
     func testSwitchSwapsOnlyClaudeAiOauthAndProfile() async throws {
@@ -71,6 +87,14 @@ final class SwitcherTests: XCTestCase {
         let teamBackup = try StoredLogin(decoding: XCTUnwrap(store.items[Fixture.team.id]))
         XCTAssertEqual(teamBackup.claudeAiOauth, Fixture.oauth("team-live"))
         XCTAssertEqual(teamBackup.profile.organizationUuid, "org-team")
+        // The login the backup replaced is kept as `previous`.
+        XCTAssertEqual(try savedRecord(Fixture.team).previous?.claudeAiOauth, Fixture.oauth("team-old"))
+
+        // team-live didn't match Team's saved login, so the profile endpoint
+        // proved it. Only the access token was sent.
+        XCTAssertEqual(lookup.tokens, ["team-live-access"])
+        XCTAssertEqual(item.preauthorizations, 1)
+        XCTAssertNil(journal.pending)
     }
 
     func testSwitchingToTheActiveAccountDoesNothing() async throws {
@@ -162,7 +186,10 @@ final class SwitcherTests: XCTestCase {
             try await self.switchToPersonal()
         }
         try assertLiveIsTeam()
-        XCTAssertEqual(item.writes.count, 2)
+        // The failed write changed nothing, so the rollback found the
+        // pre-switch envelope in place and didn't write again.
+        XCTAssertEqual(item.writes.count, 1)
+        XCTAssertNil(journal.pending)
     }
 
     func testProfileWriteFailureRollsBack() async throws {
@@ -194,6 +221,217 @@ final class SwitcherTests: XCTestCase {
             XCTAssertTrue(error.isBlocking)
             XCTAssertTrue(error.message.contains("claude /login"))
         }
+    }
+
+    func testRollbackIsSkippedWhenTheItemChangedAfterTheSwitchWroteIt() async throws {
+        config.failWrite = { $0 == 1 ? TestFailure() : nil }  // step 6 fails
+        let rotated = Fixture.envelope(Fixture.oauth("personal-rotated"))
+        // Read 1 is step 2, read 2 the in-process read before the write,
+        // read 3 the rollback's re-read: Claude Code rotated the token first.
+        item.onRead = { item, count in if count == 3 { item.data = rotated } }
+        do {
+            _ = try await switchToPersonal()
+            XCTFail("expected rollbackSkipped")
+        } catch let error as SwitchError {
+            guard case .rollbackSkipped = error else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.isBlocking)
+        }
+        XCTAssertEqual(item.data, rotated, "the rotated login must not be overwritten")
+        XCTAssertEqual(item.writes.count, 1)
+        XCTAssertEqual(config.writes, 1)  // the failed step 6 only; the profile wasn't touched after
+        XCTAssertNotNil(journal.pending, "the journal stays so the recovery alert shows")
+    }
+
+    // MARK: - Ownership
+
+    func testUnexpiredTokenFromAnotherOrgFails() async throws {
+        lookup.prefixes = ["team-live": "org-personal"]
+        await assertThrows(.liveLoginMismatch) { try await self.switchToPersonal() }
+        assertNothingChanged()
+        await assertThrows(.liveLoginMismatch) { try await self.makeSwitcher().saveCurrentLogin { _ in "x" } }
+        assertNothingChanged()
+    }
+
+    func testExpiredTokenMatchingTheSavedBackupPasses() async throws {
+        // Claude's item still holds the tokens Team's backup has, now expired.
+        let old = Fixture.oauth("team-old", expiresAt: Fixture.expired)
+        item.data = Fixture.envelope(old)
+        store.items[Fixture.team.id] = try StoredLogin(claudeAiOauth: old, profile: Fixture.profile(org: "org-team")).encoded()
+        lookup.result = .failed("must not be called")
+        let outcome = try await switchToPersonal()
+        XCTAssertEqual(outcome, .switched)
+        XCTAssertEqual(lookup.tokens, [])
+    }
+
+    func testExpiredTokenWithNoMatchFailsClosed() async throws {
+        item.data = Fixture.envelope(Fixture.oauth("team-new", expiresAt: Fixture.expired))
+        await assertThrows(.ownershipUnverified(SwitchError.expiredAndUnmatched)) { try await self.switchToPersonal() }
+        assertNothingChanged()
+        XCTAssertEqual(lookup.tokens, [], "an expired token isn't sent")
+        XCTAssertTrue(SwitchError.ownershipUnverified(SwitchError.expiredAndUnmatched).message
+            .contains("Use Claude Code once so it refreshes, then try again."))
+        await assertThrows(.ownershipUnverified(SwitchError.expiredAndUnmatched)) {
+            try await self.makeSwitcher().saveCurrentLogin { _ in "x" }
+        }
+        assertNothingChanged()
+    }
+
+    func testRejectedTokenFailsClosed() async throws {
+        lookup.result = .unauthorized
+        await assertThrows(.ownershipUnverified(SwitchError.expiredAndUnmatched)) { try await self.switchToPersonal() }
+        assertNothingChanged()
+    }
+
+    func testCrossAccountRefreshTokenMatchFails() async throws {
+        // ~/.claude.json names Team, but the item holds Personal's saved tokens.
+        item.data = Fixture.envelope(Fixture.oauth("personal"))
+        lookup.prefixes = ["personal": "org-team"]  // even a lying profile check can't override it
+        await assertThrows(.liveLoginMismatch) { try await self.makeSwitcher().saveCurrentLogin { _ in "x" } }
+        assertNothingChanged()
+
+        // Switching to a third account runs the same check.
+        let other = SavedAccount(id: "other-id", label: "Other", email: "me@x.com", orgUuid: "org-other")
+        accounts.accounts.append(other)
+        store.items[other.id] = try Fixture.stored("other", org: "org-other")
+        let storeWritesBefore = store.writes
+        await assertThrows(.liveLoginMismatch) { try await self.makeSwitcher().switchTo(other.id) { _ in true } }
+        XCTAssertEqual(store.writes, storeWritesBefore)
+        XCTAssertTrue(item.writes.isEmpty)
+        XCTAssertEqual(lookup.tokens, [])
+    }
+
+    func testNetworkErrorFailsClosed() async throws {
+        lookup.result = .failed("network error -1009")
+        await assertThrowsCase({ if case .ownershipUnverified(let why) = $0 { why.contains("-1009") } else { false } }) {
+            try await self.switchToPersonal()
+        }
+        assertNothingChanged()
+        await assertThrowsCase({ if case .ownershipUnverified = $0 { true } else { false } }) {
+            try await self.makeSwitcher().saveCurrentLogin { _ in "x" }
+        }
+        assertNothingChanged()
+    }
+
+    func testUnreadableOtherSavedLoginFailsClosed() async throws {
+        store.items[Fixture.personal.id] = Data("not json".utf8)
+        await assertThrowsCase({ if case .ownershipUnverified = $0 { true } else { false } }) {
+            try await self.makeSwitcher().saveCurrentLogin { _ in "x" }
+        }
+        assertNothingChanged()
+    }
+
+    func testProfileEndpointIsOnlySentAccessTokens() async throws {
+        _ = try await makeSwitcher().saveCurrentLogin { _ in "x" }
+        _ = try await switchToPersonal()
+        XCTAssertFalse(lookup.tokens.isEmpty)
+        XCTAssertTrue(lookup.tokens.allSatisfy { $0.hasSuffix("-access") }, "\(lookup.tokens)")
+    }
+
+    // MARK: - Keychain pinning and pre-authorization
+
+    func testMoreThanOneClaudeItemAbortsBeforeAnyChange() async throws {
+        item.uniqueError = ClaudeItem.Failure.notUnique(found: ["/a/login.keychain-db", "/b/other.keychain-db"],
+                                                        expected: "/a/login.keychain-db")
+        await assertThrows(.claudeItemNotUnique(found: ["/a/login.keychain-db", "/b/other.keychain-db"],
+                                                expected: "/a/login.keychain-db")) {
+            try await self.switchToPersonal()
+        }
+        assertNothingChanged()
+        XCTAssertEqual(item.reads, 0)
+    }
+
+    func testDeclinedKeychainAccessAbortsBeforeTheBackup() async throws {
+        item.preauthorizeError = ClaudeItem.Failure.readFailed(status: errSecUserCanceled)
+        await assertThrowsCase({ if case .keychainAccessDenied = $0 { true } else { false } }) {
+            try await self.switchToPersonal()
+        }
+        assertNothingChanged()
+    }
+
+    // MARK: - Pending-switch journal
+
+    func testJournalIsWrittenBeforeTheItemWriteAndClearedOnSuccess() async throws {
+        let seen = Box<PendingSwitch?>(nil)
+        let journal = self.journal!
+        item.onWrite = { _, count in if count == 1 { seen.value = journal.pending } }
+        _ = try await switchToPersonal()
+        XCTAssertEqual(seen.value, PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now))
+        XCTAssertNil(journal.pending)
+    }
+
+    func testCrashAfterTheItemWriteBlocksSwitchingUntilRestored() async throws {
+        // Capture what's on disk the moment the item write lands, as if the
+        // app died right then: step 6 never ran.
+        let crash = Box<(item: Data?, journal: PendingSwitch?, store: [String: Data])?>(nil)
+        let (journal, store) = (self.journal!, self.store!)
+        item.onWrite = { item, count in
+            if count == 1 { crash.value = (item.data, journal.pending, store.items) }
+        }
+        _ = try await switchToPersonal()
+        let state = try XCTUnwrap(crash.value)
+
+        item = FakeItem(state.item)
+        self.store = FakeStore()
+        self.store.items = state.store
+        config = FakeConfig(Fixture.profile(org: "org-team"))
+        self.journal = FakeJournal()
+        self.journal.pending = state.journal
+        let relaunched = makeSwitcher()
+
+        let pending = try await relaunched.unfinishedSwitch()
+        XCTAssertEqual(pending?.fromId, Fixture.team.id)
+        await assertThrows(.switchUnfinished) { try await relaunched.switchTo(Fixture.team.id) { _ in true } }
+        await assertThrows(.switchUnfinished) { try await relaunched.saveCurrentLogin { _ in "x" } }
+        await assertThrows(.switchUnfinished) { try await relaunched.restorePrevious(Fixture.team.id) }
+        await assertThrows(.switchUnfinished) { try await relaunched.remove(Fixture.team.id) }
+        XCTAssertTrue(item.writes.isEmpty)
+
+        // "Restore Team" puts Team's backed-up login and profile back.
+        try await relaunched.restoreUnfinishedSwitch()
+        let live = try Envelope(XCTUnwrap(item.data))
+        XCTAssertEqual(try live.claudeAiOauth(), Fixture.oauth("team-live"))
+        XCTAssertEqual(live.member("mcpOAuth"), Data(#"{"server":{"accessToken":"mcp-secret"}}"#.utf8))
+        XCTAssertEqual(config.profile?.organizationUuid, "org-team")
+        XCTAssertNil(self.journal.pending)
+        // Personal's saved login is untouched by the recovery.
+        XCTAssertEqual(try StoredLogin(decoding: XCTUnwrap(self.store.items[Fixture.personal.id])).claudeAiOauth,
+                       Fixture.oauth("personal"))
+
+        let outcome = try await relaunched.switchTo(Fixture.personal.id) { _ in true }
+        XCTAssertEqual(outcome, .switched)
+    }
+
+    func testRestoreSavesARotatedLiveLoginBeforeOverwritingIt() async throws {
+        // Interrupted Team → Personal; Claude Code then refreshed Personal's
+        // tokens, so the live login is the only valid Personal copy.
+        item.data = Fixture.envelope(Fixture.oauth("personal-rotated"))
+        journal.pending = PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now)
+        try await makeSwitcher().restoreUnfinishedSwitch()
+        XCTAssertEqual(try savedRecord(Fixture.personal).current.claudeAiOauth, Fixture.oauth("personal-rotated"))
+        XCTAssertEqual(try savedRecord(Fixture.personal).previous?.claudeAiOauth, Fixture.oauth("personal"))
+        XCTAssertEqual(try Envelope(XCTUnwrap(item.data)).claudeAiOauth(), Fixture.oauth("team-old"))
+        XCTAssertNil(journal.pending)
+    }
+
+    func testRestoreRefusesWhenTheLiveLoginCantBeIdentified() async throws {
+        item.data = Fixture.envelope(Fixture.oauth("mystery", expiresAt: Fixture.expired))
+        let pending = PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now)
+        journal.pending = pending
+        await assertThrowsCase({ if case .ownershipUnverified = $0 { true } else { false } }) {
+            try await self.makeSwitcher().restoreUnfinishedSwitch()
+        }
+        XCTAssertTrue(item.writes.isEmpty)
+        XCTAssertEqual(store.writes, 0)
+        XCTAssertEqual(journal.pending, pending)
+    }
+
+    func testIveFixedItClearsTheJournalOnly() async throws {
+        journal.pending = PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now)
+        try await makeSwitcher().dismissUnfinishedSwitch()
+        XCTAssertNil(journal.pending)
+        XCTAssertTrue(item.writes.isEmpty)
+        XCTAssertEqual(store.writes, 0)
+        XCTAssertEqual(config.writes, 0)
     }
 
     // MARK: - One operation at a time
@@ -229,8 +467,72 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(account.orgName, "ORG-TEAM")
         XCTAssertEqual(account.plan, "team")
         XCTAssertEqual(accounts.accounts.count, 2)
-        let saved = try StoredLogin(decoding: XCTUnwrap(store.items[Fixture.team.id]))
-        XCTAssertEqual(saved.claudeAiOauth, Fixture.oauth("team-live"))
+        let saved = try savedRecord(Fixture.team)
+        XCTAssertEqual(saved.current.claudeAiOauth, Fixture.oauth("team-live"))
+        XCTAssertEqual(saved.previous?.claudeAiOauth, Fixture.oauth("team-old"))
+    }
+
+    func testSavingTheSameTokensAgainKeepsTheOlderPrevious() async throws {
+        _ = try await makeSwitcher().saveCurrentLogin { _ in nil }
+        _ = try await makeSwitcher().saveCurrentLogin { _ in nil }
+        XCTAssertEqual(try savedRecord(Fixture.team).previous?.claudeAiOauth, Fixture.oauth("team-old"))
+    }
+
+    func testRestorePreviousSwapsTheSavedLogins() async throws {
+        _ = try await makeSwitcher().saveCurrentLogin { _ in nil }
+        try await makeSwitcher().restorePrevious(Fixture.team.id)
+        var record = try savedRecord(Fixture.team)
+        XCTAssertEqual(record.current.claudeAiOauth, Fixture.oauth("team-old"))
+        XCTAssertEqual(record.previous?.claudeAiOauth, Fixture.oauth("team-live"))
+        // Again swaps back: nothing is lost.
+        try await makeSwitcher().restorePrevious(Fixture.team.id)
+        record = try savedRecord(Fixture.team)
+        XCTAssertEqual(record.current.claudeAiOauth, Fixture.oauth("team-live"))
+        XCTAssertEqual(record.previous?.claudeAiOauth, Fixture.oauth("team-old"))
+        // The live login is never touched.
+        try assertLiveIsTeam()
+        XCTAssertTrue(item.writes.isEmpty)
+
+        await assertThrows(.noPreviousLogin) { try await self.makeSwitcher().restorePrevious(Fixture.personal.id) }
+    }
+
+    func testRestorePreviousRefusesAnotherOrgsLogin() async throws {
+        let mine = StoredLogin(claudeAiOauth: Fixture.oauth("team-old"), profile: Fixture.profile(org: "org-team"))
+        let foreign = StoredLogin(claudeAiOauth: Fixture.oauth("personal"), profile: Fixture.profile(org: "org-personal"))
+        let data = try SavedLoginRecord(current: mine, previous: foreign).encoded()
+        store.items[Fixture.team.id] = data
+        await assertThrowsCase({ if case .storedLoginInvalid = $0 { true } else { false } }) {
+            try await self.makeSwitcher().restorePrevious(Fixture.team.id)
+        }
+        XCTAssertEqual(store.items[Fixture.team.id], data)
+    }
+
+    func testBackupNeverOverwritesAnUnreadableSavedLogin() async throws {
+        store.items[Fixture.team.id] = Data("garbage".utf8)
+        await assertThrowsCase({ if case .backupFailed = $0 { true } else { false } }) {
+            try await self.makeSwitcher().saveCurrentLogin { _ in nil }
+        }
+        XCTAssertEqual(store.items[Fixture.team.id], Data("garbage".utf8))
+    }
+
+    func testLiveStatusDetectsATokenFromAnotherOrg() async throws {
+        let consistent = try await makeSwitcher().liveLoginStatus()
+        XCTAssertEqual(consistent, .consistent)
+
+        lookup.prefixes = ["team-live": "org-personal"]
+        let mismatch = try await makeSwitcher().liveLoginStatus()
+        XCTAssertEqual(mismatch, .mismatch)
+
+        lookup.result = .failed("offline")
+        let unknown = try await makeSwitcher().liveLoginStatus()
+        XCTAssertEqual(unknown, .unknown)
+
+        // Personal's saved tokens under Team's profile: provable without the network.
+        item.data = Fixture.envelope(Fixture.oauth("personal"))
+        let crossed = try await makeSwitcher().liveLoginStatus()
+        XCTAssertEqual(crossed, .mismatch)
+        // Detection only.
+        assertNothingChanged()
     }
 
     func testSaveAddsANewOrgWithItsLabel() async throws {

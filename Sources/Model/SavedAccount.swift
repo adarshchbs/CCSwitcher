@@ -40,6 +40,14 @@ struct OAuthProfile: Sendable {
     var emailAddress: String? { string("emailAddress") }
     var organizationName: String? { string("organizationName") }
 
+    /// The block as canonical JSON (sorted keys), to tell whether two
+    /// profiles hold the same fields.
+    func canonicalJSON() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(fields)
+    }
+
     private func string(_ key: String) -> String? {
         guard let value = fields[key]?.value as? String, !value.isEmpty else { return nil }
         return value

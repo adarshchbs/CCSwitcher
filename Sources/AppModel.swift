@@ -11,6 +11,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeId: String?
     @Published private(set) var usage: [String: AccountUsage] = [:]
     @Published private(set) var notice: String?
+    /// The live Keychain token provably belongs to a different organization
+    /// than `~/.claude.json` names. Shown as a warning; never fixed
+    /// automatically.
+    @Published private(set) var liveMismatch = false
+    /// A switch that was interrupted before it verified or rolled back.
+    @Published private(set) var unfinished: PendingSwitch?
 
     private let switcher: Switcher
     private let usageClient: UsageClient
@@ -21,9 +27,17 @@ final class AppModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        switcher = Switcher(item: ClaudeItem(), store: AccountStore(), config: ClaudeConfig(),
-                            accounts: DefaultsAccountList(defaults: defaults), sessions: SessionGuard())
-        usageClient = UsageClient(clock: clock)
+        // Every Keychain call goes to the keychain that is the default now.
+        // Without one there is nowhere safe to read or write: fail fast.
+        let keychain: KeychainPin
+        do { keychain = try KeychainPin.userDefault() } catch { fatalError("No default keychain: \(error)") }
+        // One session for both requests: ephemeral, no cache, no redirects.
+        let http = EphemeralHTTP()
+        switcher = Switcher(item: ClaudeItem(keychain: keychain), store: AccountStore(keychain: keychain),
+                            config: ClaudeConfig(), accounts: DefaultsAccountList(defaults: defaults),
+                            sessions: SessionGuard(), lookup: ProfileClient(http: http), clock: clock,
+                            journal: DefaultsSwitchJournal(defaults: defaults))
+        usageClient = UsageClient(http: http, clock: clock)
         cache = UsageCache(defaults: defaults)
 
         // The menu-style MenuBarExtra is an NSMenu: refresh when it opens.
@@ -31,7 +45,11 @@ final class AppModel: ObservableObject {
                                                object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.menuOpened() }
         }
-        Task { await reload() }
+        Task {
+            await reload()
+            _ = await resolveUnfinishedSwitch()
+            await checkLiveStatus()
+        }
     }
 
     /// The menu bar shows the active account's initial, or `?`.
@@ -85,6 +103,23 @@ final class AppModel: ObservableObject {
         perform { try await self.switcher.remove(account.id) }
     }
 
+    func restorePrevious(_ account: SavedAccount) {
+        guard Prompts.confirmRestorePrevious(account.label) else { return }
+        perform {
+            try await self.switcher.restorePrevious(account.id)
+            Prompts.inform("Restored \(account.label)",
+                           "The previous saved login is back. The one it replaced is now the previous login, so you can undo this the same way.")
+        }
+    }
+
+    /// The menu's "Unfinished switch" row.
+    func resolveUnfinishedSwitchNow() {
+        Task {
+            _ = await resolveUnfinishedSwitch()
+            await reload()
+        }
+    }
+
     // MARK: - Refresh
 
     private func menuOpened() {
@@ -98,6 +133,7 @@ final class AppModel: ObservableObject {
         do {
             accounts = try await switcher.savedAccounts()
             activeId = try await switcher.liveOwner()?.id
+            unfinished = try await switcher.unfinishedSwitch()
             usage = try cache.load()
             notice = nil
         } catch let error as SwitchError {
@@ -117,6 +153,7 @@ final class AppModel: ObservableObject {
         }
         if !force, let last = lastUsageFetch, now.timeIntervalSince(last) < 60 { return }
         lastUsageFetch = now
+        await checkLiveStatus()
 
         do {
             let tokens = try await switcher.usageTokens()
@@ -141,8 +178,65 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Whether the live token provably belongs to another org than the
+    /// profile names. Detection only.
+    private func checkLiveStatus() async {
+        do {
+            liveMismatch = try await switcher.liveLoginStatus() == .mismatch
+        } catch SwitchError.busy {
+            return  // An operation is running; the next menu open checks again.
+        } catch is CancellationError {
+            return
+        } catch let error as SwitchError {
+            notice = error.message
+        } catch {
+            notice = "Unexpected error: \(error)"
+        }
+    }
+
+    /// Shows the recovery alert when a switch was interrupted. Returns true
+    /// when there was one, so the caller skips its own operation: the user
+    /// decides what happens next, and nothing runs on its own.
+    private func resolveUnfinishedSwitch() async -> Bool {
+        let pending: PendingSwitch?
+        do {
+            pending = try await switcher.unfinishedSwitch()
+        } catch let error as SwitchError {
+            Prompts.show(error)
+            return true
+        } catch {
+            Prompts.showUnexpected(error)
+            return true
+        }
+        guard let pending else { return false }
+        unfinished = pending
+        let from = accounts.first { $0.id == pending.fromId }?.label
+        let to = accounts.first { $0.id == pending.toId }?.label
+        do {
+            switch Prompts.recoverUnfinishedSwitch(from: from, to: to, startedAt: pending.startedAt) {
+            case .restore:
+                try await switcher.restoreUnfinishedSwitch()
+                Prompts.inform("Restored \(from ?? "the previous login")", "Claude Code is back on the login it used before the unfinished switch.")
+            case .dismiss:
+                try await switcher.dismissUnfinishedSwitch()
+            case .later:
+                break
+            }
+        } catch let error as SwitchError {
+            Prompts.show(error)
+        } catch {
+            Prompts.showUnexpected(error)
+        }
+        lastUsageFetch = nil
+        return true
+    }
+
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
         Task {
+            if await resolveUnfinishedSwitch() {
+                await reload()
+                return
+            }
             do {
                 try await operation()
             } catch let error as SwitchError {

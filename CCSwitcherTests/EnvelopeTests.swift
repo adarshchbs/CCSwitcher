@@ -53,8 +53,68 @@ final class EnvelopeTests: XCTestCase {
     }
 
     func testEscapedKeysAreDecoded() throws {
-        let envelope = try Envelope(Data(#"{"claudeAiOauth":{"a":1}}"#.utf8))
+        // `\u0041` is "A": the key decodes to claudeAiOauth.
+        let envelope = try Envelope(Data(#"{"claude\u0041iOauth":{"a":1}}"#.utf8))
         XCTAssertEqual(try envelope.claudeAiOauth(), Data(#"{"a":1}"#.utf8))
+    }
+
+    func testEscapedDuplicateKeyIsRejected() {
+        XCTAssertThrowsError(try Envelope(Data(#"{"claudeAiOauth":{},"claude\u0041iOauth":{}}"#.utf8))) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("claudeAiOauth"))
+        }
+    }
+
+    func testNestedDuplicatesInClaudeAiOauthAreRejected() throws {
+        let plain = try Envelope(Data(#"{"claudeAiOauth":{"refreshToken":"a","refreshToken":"b"}}"#.utf8))
+        XCTAssertThrowsError(try plain.claudeAiOauth()) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("refreshToken"))
+        }
+        let escaped = try Envelope(Data(#"{"claudeAiOauth":{"refreshToken":"a","refresh\u0054oken":"b"}}"#.utf8))
+        XCTAssertThrowsError(try escaped.claudeAiOauth()) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("refreshToken"))
+        }
+        let deep = try Envelope(Data(#"{"claudeAiOauth":{"scopes":[1,{"k":1,"x":{"k":2},"k":3}]}}"#.utf8))
+        XCTAssertThrowsError(try deep.claudeAiOauth()) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("k"))
+        }
+        // Same key in sibling objects is fine.
+        let siblings = try Envelope(Data(#"{"claudeAiOauth":{"a":{"k":1},"b":{"k":2},"c":[{"k":1},{"k":2}]}}"#.utf8))
+        XCTAssertNoThrow(try siblings.claudeAiOauth())
+
+        XCTAssertThrowsError(try OAuthLogin(raw: Data(#"{"accessToken":"a","refreshToken":"r","refreshToken":"s"}"#.utf8)))
+        XCTAssertThrowsError(try Envelope(Data("{}".utf8))
+            .replacing("claudeAiOauth", with: Data(#"{"accessToken":"a","accessToken":"b"}"#.utf8)))
+    }
+
+    func testOtherMembersKeepTheirDuplicatesUntouched() throws {
+        // Not ours to judge: mcpOAuth survives a switch byte for byte.
+        let envelope = try Envelope(Data(#"{"mcpOAuth":{"x":1,"x":2},"claudeAiOauth":{"a":1}}"#.utf8))
+        let after = try envelope.replacing("claudeAiOauth", with: replacement)
+        XCTAssertEqual(after.member("mcpOAuth"), Data(#"{"x":1,"x":2}"#.utf8))
+    }
+
+    func testNestedDuplicatesInOAuthAccountAreRejected() throws {
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"},"oauthAccount":{"organizationUuid":"org-1","organization\u0055uid":"org-2"}}"#.utf8)
+        XCTAssertThrowsError(try StoredLogin(decoding: data)) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("organizationUuid"))
+        }
+    }
+
+    func testRecordKeepsOnePreviousGeneration() throws {
+        let profile = OAuthProfile(fields: ["organizationUuid": AnyCodable("org-1")])
+        let one = StoredLogin(claudeAiOauth: Data(#"{"accessToken":"a1","refreshToken":"r1"}"#.utf8), profile: profile)
+        let two = StoredLogin(claudeAiOauth: Data(#"{"accessToken":"a2","refreshToken":"r2"}"#.utf8), profile: profile)
+        let three = StoredLogin(claudeAiOauth: Data(#"{"accessToken":"a3","refreshToken":"r3"}"#.utf8), profile: profile)
+        // An item from before `previous` existed decodes without one.
+        let legacy = try SavedLoginRecord(decoding: try one.encoded())
+        XCTAssertNil(legacy.previous)
+        let record = legacy.replacingCurrent(with: two).replacingCurrent(with: three)
+        let decoded = try SavedLoginRecord(decoding: try record.encoded())
+        XCTAssertEqual(decoded.current.claudeAiOauth, three.claudeAiOauth)
+        XCTAssertEqual(decoded.previous?.claudeAiOauth, two.claudeAiOauth)
+        XCTAssertNil(try Envelope(try XCTUnwrap(Envelope(try record.encoded()).member("previous"))).member("previous"))
+        // Older code reading the item still finds the current login.
+        XCTAssertEqual(try StoredLogin(decoding: try record.encoded()).claudeAiOauth, three.claudeAiOauth)
     }
 
     func testLoginRequiresBothTokens() throws {

@@ -37,6 +37,48 @@ enum Prompts {
         return run(alert) == .alertFirstButtonReturn
     }
 
+    static func confirmRestorePrevious(_ label: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Restore the previous saved login for \(label)?"
+        alert.informativeText = "The saved login is swapped with the one it replaced. The current Claude login isn't changed. Doing this again swaps them back."
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+        return run(alert) == .alertFirstButtonReturn
+    }
+
+    enum Recovery {
+        case restore
+        case dismiss
+        case later
+    }
+
+    static func recoverUnfinishedSwitch(from: String?, to: String?, startedAt: Date) -> Recovery {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "A switch didn't finish"
+        let when = startedAt == .distantPast ? "" : " at \(startedAt.formatted(date: .abbreviated, time: .shortened))"
+        alert.informativeText = """
+            A switch from \(from ?? "an unknown account") to \(to ?? "an unknown account") started\(when) and was \
+            interrupted. Claude Code's Keychain item and ~/.claude.json may disagree. Switching is blocked until you \
+            choose.
+
+            Restore puts back \(from ?? "the earlier login") after saving whatever login is live now to the account it \
+            belongs to. Choose "I've fixed it" if you already fixed the login yourself (for example with `claude /login`).
+            """
+        if let from {
+            alert.addButton(withTitle: "Restore \(from)")
+        }
+        alert.addButton(withTitle: "I've fixed it")
+        alert.addButton(withTitle: "Later")
+        let response = run(alert)
+        let offset = from == nil ? 1 : 0
+        switch response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + offset {
+        case 0: return .restore
+        case 1: return .dismiss
+        default: return .later
+        }
+    }
+
     static func show(_ error: SwitchError) {
         let alert = NSAlert()
         if error.isBlocking {

@@ -49,6 +49,10 @@ final class TempKeychain {
         return keychain
     }
 
+    func pin() throws -> KeychainPin {
+        try KeychainPin(open())
+    }
+
     func delete() throws {
         try Self.security(["delete-keychain", path])
         try FileManager.default.removeItem(at: directory)

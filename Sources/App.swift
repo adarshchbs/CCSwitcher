@@ -40,6 +40,12 @@ struct MenuContent: View {
                 ))
             }
         }
+        if model.unfinished != nil {
+            Button("⚠︎ A switch didn't finish. Resolve…") { model.resolveUnfinishedSwitchNow() }
+        }
+        if model.liveMismatch {
+            Text("⚠︎ Live login doesn't match ~/.claude.json")
+        }
         if let notice = model.notice {
             Text(notice)
         }
@@ -93,6 +99,8 @@ private struct AccountRow: View {
                     .disabled(draft == account.label)
                 Button("Remove…", role: .destructive) { model.remove(account) }
             }
+            Button("Restore previous saved login…") { model.restorePrevious(account) }
+                .controlSize(.small)
             Text([account.email, account.orgName, account.plan].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -33,10 +33,23 @@ struct Envelope: Equatable, Sendable {
         ranges[key].map { bytes.subdata(in: $0) }
     }
 
-    /// The raw `claudeAiOauth` value, required to be present.
+    /// The raw `claudeAiOauth` value, required to be present and free of
+    /// duplicate keys at any depth.
     func claudeAiOauth() throws -> Data {
         guard let raw = member("claudeAiOauth") else { throw Failure.missingMember("claudeAiOauth") }
+        try Self.rejectDuplicateKeys(in: raw)
         return raw
+    }
+
+    /// Throws `duplicateKey` if any object inside the JSON value `raw`, at
+    /// any depth, repeats a key (after decoding escapes). Parsers disagree on
+    /// which copy wins, so a login with two `refreshToken`s is ambiguous.
+    static func rejectDuplicateKeys(in raw: Data) throws {
+        guard (try? JSONSerialization.jsonObject(with: raw, options: .fragmentsAllowed)) != nil else {
+            throw Failure.notAJSONObject
+        }
+        var scanner = MemberScanner(bytes: [UInt8](raw))
+        try scanner.walkValue()
     }
 
     /// A copy with `key`'s value replaced by `raw` (a JSON object), or added
@@ -45,6 +58,7 @@ struct Envelope: Equatable, Sendable {
         guard (try? JSONSerialization.jsonObject(with: raw)) is [String: Any] else {
             throw Failure.notAJSONObject
         }
+        try Self.rejectDuplicateKeys(in: raw)
         var out = Data()
         if let range = ranges[key] {
             out.append(bytes.subdata(in: 0..<range.lowerBound))
@@ -77,6 +91,7 @@ struct OAuthLogin: Equatable, Sendable {
         guard let object = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
             throw Envelope.Failure.notAJSONObject
         }
+        try Envelope.rejectDuplicateKeys(in: raw)
         guard let access = object["accessToken"] as? String, !access.isEmpty else {
             throw Envelope.Failure.invalidLogin("accessToken is missing or empty")
         }
@@ -90,9 +105,9 @@ struct OAuthLogin: Equatable, Sendable {
     }
 }
 
-/// Finds the byte range of each top-level member value in a JSON object.
-/// Runs only on input that `JSONSerialization` already accepted, so it can
-/// assume well-formed JSON.
+/// Finds the byte range of each top-level member value in a JSON object, and
+/// finds duplicate keys at any depth. Runs only on input that
+/// `JSONSerialization` already accepted, so it can assume well-formed JSON.
 private struct MemberScanner {
     let bytes: [UInt8]
     var i = 0
@@ -120,6 +135,43 @@ private struct MemberScanner {
             }
             guard peek == UInt8(ascii: "}") else { throw Envelope.Failure.notAJSONObject }
             return (ranges, i)
+        }
+    }
+
+    /// Walks one JSON value, throwing `duplicateKey` for any object that
+    /// repeats a key.
+    mutating func walkValue() throws {
+        skipWhitespace()
+        switch peek {
+        case UInt8(ascii: "{"):
+            i += 1
+            skipWhitespace()
+            if peek == UInt8(ascii: "}") { i += 1; return }
+            var keys = Set<String>()
+            while true {
+                let key = try decodeKey(bytes[try scanString()])
+                guard keys.insert(key).inserted else { throw Envelope.Failure.duplicateKey(key) }
+                skipWhitespace()
+                try expect(UInt8(ascii: ":"))
+                try walkValue()
+                skipWhitespace()
+                if peek == UInt8(ascii: ",") { i += 1; skipWhitespace(); continue }
+                try expect(UInt8(ascii: "}"))
+                return
+            }
+        case UInt8(ascii: "["):
+            i += 1
+            skipWhitespace()
+            if peek == UInt8(ascii: "]") { i += 1; return }
+            while true {
+                try walkValue()
+                skipWhitespace()
+                if peek == UInt8(ascii: ",") { i += 1; continue }
+                try expect(UInt8(ascii: "]"))
+                return
+            }
+        default:
+            _ = try scanValue()
         }
     }
 

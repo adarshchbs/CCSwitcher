@@ -30,7 +30,7 @@ final class StaticChecksTests: XCTestCase {
         XCTAssertEqual(users, ["UsageClient.swift"])
     }
 
-    func testTheOnlyURLIsTheUsageEndpoint() throws {
+    func testTheOnlyURLsAreTheUsageAndProfileEndpoints() throws {
         let pattern = try NSRegularExpression(pattern: #"https?://[^\s"'`)]+"#)
         var urls = Set<String>()
         for file in try sources() {
@@ -39,18 +39,35 @@ final class StaticChecksTests: XCTestCase {
                 urls.insert(String(content[Range(match.range, in: content)!]))
             }
         }
-        XCTAssertEqual(urls, ["https://api.anthropic.com/api/oauth/usage"])
+        XCTAssertEqual(urls, ["https://api.anthropic.com/api/oauth/usage", "https://api.anthropic.com/api/oauth/profile"])
+    }
+
+    private func body(of signature: String, in content: String) throws -> String {
+        let start = try XCTUnwrap(content.range(of: signature), signature)
+        let end = try XCTUnwrap(content.range(of: "\n    }\n", range: start.upperBound..<content.endIndex))
+        return String(content[start.lowerBound..<end.upperBound])
     }
 
     func testClaudeItemWriteNeverUsesPasswordArgument() throws {
         let content = try text(root.appendingPathComponent("Sources/Keychain/ClaudeItem.swift"))
-        let start = try XCTUnwrap(content.range(of: "    func write(_ data: Data) throws {"))
-        let end = try XCTUnwrap(content.range(of: "\n    }\n", range: start.upperBound..<content.endIndex))
-        let write = String(content[start.lowerBound..<end.upperBound])
+        let write = try body(of: "    private func updateData(_ data: Data) throws {", in: content)
         // Writes go through SecItemUpdate, never through a `security` process.
         XCTAssertTrue(write.contains("SecItemUpdate("))
         XCTAssertFalse(write.contains("runner"))
         XCTAssertFalse(write.contains(#""-w""#))
+
+        // The final read and the write run back to back in-process: nothing
+        // between them may spawn a process.
+        let update = try body(of: "    func update(_ transform: (Data) throws -> Data?) throws -> Data {", in: content)
+        XCTAssertTrue(update.contains("readInProcess()"))
+        XCTAssertTrue(update.contains("updateData("))
+        let read = try body(of: "    private func readInProcess() throws -> Data {", in: content)
+        XCTAssertTrue(read.contains("SecItemCopyMatching("))
+        for part in [update, read, write] {
+            for spawn in [#"\brunner\b"#, #"\bProcess\b"#, #"/usr/bin/security"#] {
+                XCTAssertNil(part.range(of: spawn, options: .regularExpression), "\(spawn) in the critical window")
+            }
+        }
         // The item is never created or deleted, and no other write path exists.
         for banned in ["add-generic-password", "delete-generic-password", "SecItemAdd", "SecItemDelete", #""-i""#, #""-X""#] {
             XCTAssertFalse(content.contains(banned), banned)

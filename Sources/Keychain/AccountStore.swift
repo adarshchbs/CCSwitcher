@@ -24,11 +24,11 @@ final class AccountStore: SavedLoginStore, @unchecked Sendable {
     static let accountService = "com.adarshchbs.ccswitcher.account"
 
     private let service: String
-    /// Tests aim the store at a temporary keychain. Production passes nil
-    /// and uses the default keychain.
-    private let keychain: SecKeychain?
+    /// Every call goes to this keychain: the user's default keychain in
+    /// production (see `KeychainPin.userDefault()`), a temp one in tests.
+    private let keychain: KeychainPin
 
-    init(service: String = accountService, keychain: SecKeychain? = nil) {
+    init(service: String = accountService, keychain: KeychainPin) {
         self.service = service
         self.keychain = keychain
     }
@@ -52,7 +52,7 @@ final class AccountStore: SavedLoginStore, @unchecked Sendable {
         var add = baseQuery(id: id)
         add[kSecValueData as String] = data
         add[kSecAttrLabel as String] = "CCSwitcher saved login"
-        if let keychain { add[kSecUseKeychain as String] = keychain }
+        add[kSecUseKeychain as String] = keychain.keychain
         try check(SecItemAdd(add as CFDictionary, nil))
     }
 
@@ -74,7 +74,7 @@ final class AccountStore: SavedLoginStore, @unchecked Sendable {
 
     private func matchQuery(id: String) -> [String: Any] {
         var query = baseQuery(id: id)
-        if let keychain { query[kSecMatchSearchList as String] = [keychain] }
+        query[kSecMatchSearchList as String] = [keychain.keychain]
         return query
     }
 
@@ -87,8 +87,37 @@ final class AccountStore: SavedLoginStore, @unchecked Sendable {
     }
 }
 
-/// What a saved account's Keychain item holds:
-/// `{"claudeAiOauth": {...}, "oauthAccount": {...}}`.
+/// What a saved account's Keychain item holds: the current login, plus the
+/// one it replaced (one generation), so an overwrite can be undone:
+/// `{"claudeAiOauth": {...}, "oauthAccount": {...}, "previous": {"claudeAiOauth": {...}, "oauthAccount": {...}}}`.
+/// Items written before `previous` existed decode with `previous == nil`.
+struct SavedLoginRecord: Sendable {
+    let current: StoredLogin
+    let previous: StoredLogin?
+
+    init(current: StoredLogin, previous: StoredLogin?) {
+        self.current = current
+        self.previous = previous
+    }
+
+    init(decoding data: Data) throws {
+        current = try StoredLogin(decoding: data)
+        previous = try Envelope(data).member("previous").map(StoredLogin.init(decoding:))
+    }
+
+    func encoded() throws -> Data {
+        try current.encoded(previous: previous)
+    }
+
+    /// The record after saving `login` over this one. `previous` becomes the
+    /// replaced login, unless the tokens are unchanged: then the older
+    /// generation is kept rather than overwritten with a copy of `current`.
+    func replacingCurrent(with login: StoredLogin) -> SavedLoginRecord {
+        SavedLoginRecord(current: login, previous: login.claudeAiOauth == current.claudeAiOauth ? previous : current)
+    }
+}
+
+/// One saved login: `{"claudeAiOauth": {...}, "oauthAccount": {...}}`.
 ///
 /// `claudeAiOauth` keeps the exact bytes read from Claude Code's item, so a
 /// switch writes back exactly what was saved.
@@ -109,16 +138,20 @@ struct StoredLogin: Sendable {
         let object = try Envelope(data)
         claudeAiOauth = try object.claudeAiOauth()
         guard let rawProfile = object.member("oauthAccount") else { throw Failure.missingProfile }
+        try Envelope.rejectDuplicateKeys(in: rawProfile)
         profile = OAuthProfile(fields: try JSONDecoder().decode([String: AnyCodable].self, from: rawProfile))
     }
 
-    func encoded() throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
+    /// The item bytes, with `previous` appended when given.
+    func encoded(previous: StoredLogin? = nil) throws -> Data {
         var out = Data(#"{"claudeAiOauth":"#.utf8)
         out.append(claudeAiOauth)
         out.append(Data(#","oauthAccount":"#.utf8))
-        out.append(try encoder.encode(profile.fields))
+        out.append(try profile.canonicalJSON())
+        if let previous {
+            out.append(Data(#","previous":"#.utf8))
+            out.append(try previous.encoded())
+        }
         out.append(Data("}".utf8))
         return out
     }

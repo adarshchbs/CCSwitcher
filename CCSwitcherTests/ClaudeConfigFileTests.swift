@@ -59,4 +59,16 @@ final class ClaudeConfigFileTests: XCTestCase {
             XCTAssertEqual($0 as? ClaudeConfig.Failure, .noOAuthAccount)
         }
     }
+
+    func testDuplicateKeysInOAuthAccountAreRejected() throws {
+        let nested = try makeFile(#"{"oauthAccount": {"organizationUuid": "org-1", "organizationUuid": "org-2"}}"#)
+        XCTAssertThrowsError(try ClaudeConfig(path: nested).readProfile()) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("organizationUuid"))
+        }
+        try FileManager.default.removeItem(atPath: nested)
+        let topLevel = try makeFile(#"{"oauthAccount": {"organizationUuid": "org-1"}, "oauth\u0041ccount": {"organizationUuid": "org-2"}}"#)
+        XCTAssertThrowsError(try ClaudeConfig(path: topLevel).readProfile()) {
+            XCTAssertEqual($0 as? Envelope.Failure, .duplicateKey("oauthAccount"))
+        }
+    }
 }

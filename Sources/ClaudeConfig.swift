@@ -25,9 +25,14 @@ struct ClaudeConfig: ClaudeProfileAccess {
         self.path = path
     }
 
+    /// The `oauthAccount` block. Refuses a file with a duplicate top-level
+    /// key, or an `oauthAccount` with a duplicate key at any depth: parsers
+    /// disagree on which copy wins, so the profile would be ambiguous.
     func readProfile() throws -> OAuthProfile {
-        let json = try readJSON(at: path)
-        guard let block = json["oauthAccount"]?.value as? [String: AnyCodable] else {
+        guard let data = FileManager.default.contents(atPath: path) else { throw Failure.unreadable }
+        guard let raw = try Envelope(data).member("oauthAccount") else { throw Failure.noOAuthAccount }
+        try Envelope.rejectDuplicateKeys(in: raw)
+        guard let block = try JSONDecoder().decode(AnyCodable.self, from: raw).value as? [String: AnyCodable] else {
             throw Failure.noOAuthAccount
         }
         return OAuthProfile(fields: block)

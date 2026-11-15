@@ -6,17 +6,20 @@ final class FakeHTTP: HTTPGetting, @unchecked Sendable {
     let status: Int
     let body: Data
     let headers: [String: String]
+    let error: URLError?
 
-    init(status: Int, body: String = "{}", headers: [String: String] = [:]) {
+    init(status: Int, body: String = "{}", headers: [String: String] = [:], error: URLError? = nil) {
         self.status = status
         self.body = Data(body.utf8)
         self.headers = headers
+        self.error = error
     }
 
     var requests: [URLRequest] { lock.withLock { _requests } }
 
     func get(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         lock.withLock { _requests.append(request) }
+        if let error { throw error }
         let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: status,
                                        httpVersion: nil, headerFields: headers)!
         return (body, response)
@@ -102,7 +105,8 @@ final class UsageTests: XCTestCase {
         store.items[Fixture.team.id] = try Fixture.stored("team-old", org: "org-team")
         store.items[Fixture.personal.id] = try Fixture.stored("personal", org: "org-personal")
         let switcher = Switcher(item: item, store: store, config: FakeConfig(Fixture.profile(org: "org-team")),
-                                accounts: FakeAccounts([Fixture.team, Fixture.personal]), sessions: FakeSessions())
+                                accounts: FakeAccounts([Fixture.team, Fixture.personal]), sessions: FakeSessions(),
+                                lookup: FakeLookup(), clock: FixedClock(date: now), journal: FakeJournal())
 
         let tokens = try await switcher.usageTokens()
         XCTAssertEqual(tokens[Fixture.team.id]?.accessToken, "team-live-access")
@@ -114,5 +118,66 @@ final class UsageTests: XCTestCase {
         let partial = try await switcher.usageTokens()
         XCTAssertNil(partial[Fixture.personal.id])
         XCTAssertNotNil(partial[Fixture.team.id])
+    }
+}
+
+final class ProfileClientTests: XCTestCase {
+    func testRequestShapeAndOrganization() async throws {
+        let http = FakeHTTP(status: 200, body: """
+        {"account":{"uuid":"acct-1","email":"me@x.com"},"organization":{"uuid":"org-team","name":"Acme","organization_type":"claude_team"}}
+        """)
+        let result = try await ProfileClient(http: http).organization(accessToken: "access")
+        XCTAssertEqual(result, .organization(uuid: "org-team", name: "Acme"))
+        let request = try XCTUnwrap(http.requests.first)
+        XCTAssertEqual(http.requests.count, 1)
+        XCTAssertEqual(request.url, ProfileClient.url)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/api/oauth/profile")
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer access")
+        XCTAssertNil(request.httpBody)
+    }
+
+    func testFailuresAreNotAPass() async throws {
+        let unauthorized = try await ProfileClient(http: FakeHTTP(status: 401)).organization(accessToken: "a")
+        XCTAssertEqual(unauthorized, .unauthorized)
+        let offline = try await ProfileClient(http: FakeHTTP(status: 0, error: URLError(.notConnectedToInternet)))
+            .organization(accessToken: "a")
+        XCTAssertEqual(offline, .failed("network error \(URLError.notConnectedToInternet.rawValue)"))
+        let redirected = try await ProfileClient(http: FakeHTTP(status: 302, headers: ["Location": "https://example.invalid/"]))
+            .organization(accessToken: "a")
+        XCTAssertEqual(redirected, .failed("HTTP 302"))
+        let noOrg = try await ProfileClient(http: FakeHTTP(status: 200, body: #"{"account":{}}"#)).organization(accessToken: "a")
+        XCTAssertEqual(noOrg, .failed("no organization in the response"))
+        let garbage = try await ProfileClient(http: FakeHTTP(status: 200, body: "[1]")).organization(accessToken: "a")
+        XCTAssertEqual(garbage, .failed("unexpected response"))
+    }
+}
+
+final class RedirectTests: XCTestCase {
+    /// The delegate answers every redirect with nil: don't follow it.
+    func testDelegateRefusesRedirects() throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        // Created but never resumed: no request is sent.
+        let task = session.dataTask(with: UsageClient.url)
+        let response = try XCTUnwrap(HTTPURLResponse(url: UsageClient.url, statusCode: 302, httpVersion: "HTTP/1.1",
+                                                     headerFields: ["Location": "https://example.invalid/steal"]))
+        let answer = Box<URLRequest??>(nil)
+        RedirectRefuser().urlSession(session, task: task, willPerformHTTPRedirection: response,
+                                     newRequest: URLRequest(url: try XCTUnwrap(URL(string: "https://example.invalid/steal")))) {
+            answer.value = .some($0)
+        }
+        let called = try XCTUnwrap(answer.value, "completion handler not called")
+        XCTAssertNil(called)
+    }
+
+    func testSharedSessionIsEphemeralUncachedAndRefusesRedirects() {
+        let http = EphemeralHTTP()
+        XCTAssertTrue(http.session.delegate is RedirectRefuser)
+        XCTAssertNil(http.session.configuration.urlCache)
+        XCTAssertNil(http.session.configuration.httpCookieStorage)
+        XCTAssertNil(http.session.configuration.urlCredentialStorage)
+        XCTAssertFalse(http.session.configuration.httpShouldSetCookies)
+        http.session.invalidateAndCancel()
     }
 }
