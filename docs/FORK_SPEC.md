@@ -21,20 +21,26 @@ below cites the audit finding behind it.
 1. **No secret ever goes in argv or the environment.** Write the Claude Code
    Keychain item in-process with `SecItemUpdate` (see Deviation 1; the
    original `security -i` plan can't carry a real-sized envelope). Reading with
-   `security find-generic-password -w` is fine, since the secret comes back on stdout.
+   `security find-generic-password -w` is fine, since the secret comes back on
+   stdout, and so is an in-process `SecItemCopyMatching` (Deviation 14).
 2. **Nothing changes credentials without a click.** No timers, wake
    handlers, launch-time capture, auto-switch, background refresh, URL
    scheme, intents or widget.
 3. **The app never calls the OAuth token endpoint.** Delete every refresh
    path. Claude Code refreshes its own tokens.
-4. **The only outbound request is** `GET https://api.anthropic.com/api/oauth/usage`.
+4. **The only outbound requests are** `GET https://api.anthropic.com/api/oauth/usage`
+   and `GET https://api.anthropic.com/api/oauth/profile`. The profile request
+   proves which organization an access token belongs to (see "Ownership
+   check"); it sends the access token only, never the refresh token. Both use
+   one ephemeral `URLSession` with no URL cache that refuses every redirect.
    No analytics, updater, pricing fetch, or version check.
 5. **Swap only `claudeAiOauth`.** When switching, read the live envelope fresh
    and replace only its `claudeAiOauth` key. Keep `mcpOAuth` and every other
    key exactly as they are. Saved accounts store only `claudeAiOauth`, plus the
    `oauthAccount` profile block.
 6. **Fail closed.** If you're unsure who owns the live credential, or a backup
-   or verification fails, abort and leave the live login as it is.
+   or verification fails, abort and leave the live login as it is. A network
+   failure during the ownership check counts as unsure, never as a pass.
 7. **Account identity is `organizationUuid`**, taken from `oauthAccount`.
    Never match accounts by email.
 8. **No file logging.** Use `os.Logger` only. Mark emails, org names and
@@ -105,7 +111,10 @@ fakes.
 - **Account metadata** (no secrets) goes in `UserDefaults`, key `accounts.v1`.
 - **Credentials:** one generic-password item per account.
   - service `com.adarshchbs.ccswitcher.account`, account `<SavedAccount.id>`
-  - data: JSON `{ "claudeAiOauth": {...}, "oauthAccount": {...} }`
+  - data: JSON `{ "claudeAiOauth": {...}, "oauthAccount": {...}, "previous": {...} }`.
+    `previous` is the login this one replaced (same two keys, one
+    generation). Overwriting a saved login moves it there, unless the
+    `claudeAiOauth` bytes are unchanged; then the older `previous` stays.
   - add with `kSecAttrSynchronizable: false` and set it explicitly
   - write with `SecItemUpdate`, falling back to `SecItemAdd` only on `errSecItemNotFound`
 - **Usage cache** goes in `UserDefaults`: percentages, reset times, and the
@@ -113,8 +122,15 @@ fakes.
 
 ### Claude Code's Keychain item
 
-- service `Claude Code-credentials`, account `NSUserName()`, login keychain.
-- **Read:** `/usr/bin/security find-generic-password -s <svc> -a <acct> -w`.
+- service `Claude Code-credentials`, account `NSUserName()`, in the user's
+  default keychain.
+- **Pinned keychain:** resolve the default keychain once with
+  `SecKeychainCopyDomainDefault(.user)`. Pass its path to every `security`
+  call, and its ref (`kSecMatchSearchList`, `kSecUseKeychain`) to every
+  `SecItem` call in `ClaudeItem` and `AccountStore`.
+- **Read:** `/usr/bin/security find-generic-password -s <svc> -a <acct> -w <keychain>`
+  for every read outside a switch's critical window. Inside it (pre-flight,
+  final re-read, rollback re-read), read in-process with `SecItemCopyMatching`.
 - **Write:** start `/usr/bin/security -i` and write this to stdin:
   `add-generic-password -U -s "Claude Code-credentials" -a "<acct>" -X <hex>\n`
   then close stdin. Check the exit status and stderr. `<acct>` must match
@@ -137,7 +153,10 @@ Menu: "Save current login…"
 2. If a saved account has the same `organizationUuid`, update its stored
    credentials. Otherwise create a new account and ask for a label, defaulting
    to `organizationName`.
-3. Read the item back to confirm it was written.
+3. **Prove ownership** of the live pair with `verifyOwner(login,
+   organizationUuid)` (see "Ownership check") before storing anything.
+4. Store it, keeping the account's old saved login as `previous`. Read the
+   item back to confirm it was written.
 
 The user logs in outside the app (`claude /login`). The app only imports.
 
@@ -151,26 +170,95 @@ Triggered only by clicking an account in the menu.
    confirms.
    - Live processes are those whose executable basename is `claude`, or whose
      PID appears in `~/.claude/sessions/*.json`.
-2. **Read live state.** Read the live envelope `E0` and `oauthAccount` `P0`.
-   Find the owner `A`, the saved account whose `organizationUuid` equals
-   `P0.organizationUuid`.
+   - **Pin the item.** Count the items matching Claude's service and account
+     across the whole keychain search list (attributes only, no data,
+     `kSecMatchLimitAll`). Require exactly one, in the pinned keychain.
+     Otherwise abort and say which keychains hold copies.
+   - **Pre-authorize.** Read Claude's item in-process and discard the data.
+     This is the read that can show the Keychain dialog; doing it now keeps
+     the dialog out of the window between the last read and the write. A
+     declined dialog aborts here, before anything changes.
+2. **Read live state.** Read the live envelope `E0` and `oauthAccount` `P0`
+   (through `security`). Find the owner `A`, the saved account whose
+   `organizationUuid` equals `P0.organizationUuid`.
    - No match: abort with "Save the current login first".
    - `A == X`: there's nothing to do.
-3. **Back up A.** Store `{E0.claudeAiOauth, P0}` in A's item. Read it back and
-   compare. If that fails, abort; nothing has changed yet.
-4. **Check for changes.** Read the live envelope `E1` again. If
-   `E1.claudeAiOauth != E0.claudeAiOauth`, go back to step 2. Allow 2 retries,
-   then abort.
-5. **Write the Claude item.** Write `E1` with `claudeAiOauth` replaced by X's
-   stored value. Every other key stays as it is in `E1`.
+   - `E0` holds X's refresh token: abort (`liveLoginMismatch`).
+   - **Prove ownership** with `verifyOwner(E0.claudeAiOauth, A.organizationUuid)`.
+     Abort if it fails.
+3. **Back up A.** Store `{E0.claudeAiOauth, P0}` in A's item, moving A's old
+   saved login to `previous`. Read it back and compare. If that fails, abort;
+   nothing has changed yet.
+4. **Journal.** Persist `{fromId: A, toId: X, startedAt}` in `UserDefaults`
+   (key `pendingSwitch.v1`, no secrets).
+5. **Re-read and write, back to back.** Read the item in-process (`E1`). If
+   `E1.claudeAiOauth != E0.claudeAiOauth`, write nothing, clear the journal
+   and go back to step 2 (2 retries, then abort). Otherwise write `E1` with
+   `claudeAiOauth` replaced by X's stored value right away with
+   `SecItemUpdate`; every other key stays as it is in `E1`. No process is
+   spawned between this read and the write.
 6. **Write the profile.** Set `~/.claude.json` `oauthAccount` to X's stored
    profile.
 7. **Verify.**
    - Re-read the item: its `claudeAiOauth.refreshToken` must equal X's.
    - Re-read `oauthAccount`: its `organizationUuid` must equal X's.
-8. **Roll back on failure.** If step 5, 6 or 7 fails, write `E1` and `P0` back,
-   then verify them. If the rollback also fails, show a blocking alert telling
-   the user to run `claude /login` and pick the org.
+   - Then clear the journal.
+8. **Roll back on failure.** If step 5, 6 or 7 fails:
+   - Re-read the item in-process. Restore `E1` only if the item holds exactly
+     what step 5 wrote, or still holds `E1`. Anything else means Claude Code
+     changed it since (it may have rotated X's token), so stop with
+     `rollbackSkipped` and leave the item and profile alone.
+   - Restore `P0` if `oauthAccount` differs from it.
+   - Verify the restored state and clear the journal. If that verification
+     fails, or the rollback was skipped, keep the journal and show a blocking
+     alert telling the user to run `claude /login` and pick the org.
+
+### Ownership check
+
+`verifyOwner(login, expectedOrgUuid)` passes if either holds:
+
+- (b) the live refresh token is byte-equal to the refresh token in the saved
+  login of the account with `expectedOrgUuid` (which was verified when it was
+  stored); or
+- (a) the access token is unexpired and
+  `GET https://api.anthropic.com/api/oauth/profile` with
+  `Authorization: Bearer <accessToken>` returns `organization.uuid ==
+  expectedOrgUuid`.
+
+(b) is checked first, so a match needs no request. It fails if the refresh
+token is byte-equal to a **different** saved account's refresh token, even
+if (a) would pass. It fails closed in every other case: an expired token with
+no match ("Can't confirm which organization the current Claude login belongs
+to: its access token has expired and it doesn't match a saved login. Use
+Claude Code once so it refreshes, then try again."), a 401/403, a network
+error, or another account's saved login that can't be read (a cross-account
+match can't be ruled out).
+
+It runs in three places: Save (step 3), Switch (step 2), and a detect-only
+status check when the app starts and when the menu opens (at most once a
+minute, with usage). The status check shows "Live login doesn't match
+~/.claude.json" in the menu when the live token is provably another
+organization's. It never fixes anything.
+
+### Unfinished switch
+
+A journal present at launch or before any operation means a switch was
+interrupted between steps 4 and 7. Every operation except the two below is
+then refused, and the app shows a recovery alert. Nothing runs on its own.
+
+- **Restore <from>:** if the live login provably belongs to `to` (or `from`)
+  by the ownership check, back it up to that account first, since it may be
+  the only valid copy. If neither can be proven, abort and change nothing.
+  Then write from's saved `claudeAiOauth` into the item (same compare and
+  write as step 5), write from's profile, verify, and clear the journal.
+- **I've fixed it:** clear the journal. Nothing else changes.
+
+### Restore previous saved login
+
+Settings has a "Restore previous saved login…" button per account. After a
+confirmation it swaps the account's saved login with `previous`, so doing it
+again swaps back. It refuses a `previous` from another organization, and it
+never touches the live login.
 
 ### Remove account
 
@@ -245,6 +333,17 @@ Keychain or `~/.claude*`. Cover:
   - an operation already in progress → the new one is rejected
 - **Usage:** an expired token sends no request. A 401 marks it expired and
   never triggers a refresh.
+- **Ownership:** an unexpired token from another org fails; an expired token
+  matching the saved backup passes with no request; an expired token with no
+  match fails closed; a cross-account refresh token match fails; a network
+  error fails closed; Save stores `previous`; Restore previous swaps back.
+- **Rollback** is skipped when the item changed after the switch wrote it.
+- **Journal:** written before the item write and cleared on success; a crash
+  right after the item write blocks every operation on the next launch until
+  "Restore" or "I've fixed it".
+- **Pinning:** a second temp keychain holding the item, on an injected search
+  list, makes the switch abort. The user's search list is never touched.
+- **Redirects:** the session's delegate refuses them.
 - **`ClaudeItem` against a temporary keychain** (`security create-keychain` in
   a temp dir, deleted in teardown):
   - a round trip of a 16 KB payload containing quotes, spaces and unicode
@@ -269,7 +368,10 @@ Pin actions by SHA.
 These tests read the source tree:
 
 - `URLSession` appears only in `UsageClient.swift`.
-- No `"-w"` argument appears next to a write call in `ClaudeItem.swift`.
+- The only URLs in the sources are the usage and profile endpoints.
+- No `"-w"` argument appears next to a write call in `ClaudeItem.swift`, and
+  nothing between `ClaudeItem.update`'s in-process read and its
+  `SecItemUpdate` can spawn a process.
 - None of these strings appear: `oauth/token`, `Sparkle`, `Aptabase`,
   `GRDB`, `FileLog`.
 
@@ -368,3 +470,46 @@ Places where the implementation differs from the text above, and why.
     would let other processes attach to the app and read its memory.
     `project.yml` sets `CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO` for Release,
     so the Release app has no entitlements at all.
+14. **Security review fixes (proof of ownership, race narrowing, journal,
+    pinning, redirects).** This round adds the "Ownership check", "Unfinished
+    switch" and "Restore previous saved login" sections and steps 1, 4, 5 and
+    8 of the switch as written above. Notes on how it was built:
+    - **What the Keychain dialog guards.** Probed on a temp keychain with
+      Keychain UI disabled (so a would-be prompt fails with `-25308` instead):
+      on an item created by `security add-generic-password`, an app outside
+      the access list gets `errSecAuthFailed` reading the data but succeeds
+      with `SecItemUpdate`. The item's ACL gives `encrypt` (which covers
+      writing the data) to every app and `decrypt` only to `/usr/bin/security`.
+      So the write never prompts, and the only dialog is for the in-process
+      read. This corrects Deviation 1's "Cost" note: the first switch asks to
+      let CCSwitcher **read** the item. Pre-authorizing therefore can't cover
+      the write, and doesn't need to; it gets the read dialog done before the
+      critical window. Not verified against the owner's real item (tests
+      never touch it); it assumes Claude Code created it with `security`'s
+      default ACL.
+    - **Reads.** `security` stays for every read outside the critical window
+      (status, usage, save, verify), because it never prompts: the item
+      already trusts `/usr/bin/security`. In-process reads would show the
+      dialog on menu open, without a click, and again after every ad hoc
+      rebuild. Inside a switch, all reads are in-process.
+    - **Residual race.** A few milliseconds remain between the in-process
+      read and `SecItemUpdate`, and between the last `~/.claude.json`
+      fingerprint check and the rename. Claude Code has no lock to coordinate
+      on. The README lists both under "Known risks".
+    - **Rollback leaves `~/.claude.json` alone when it already equals `P0`**,
+      to avoid a needless rewrite that could race Claude Code.
+    - **Restore previous swaps** current and `previous` instead of dropping
+      the current login, so it can be undone.
+    - **A journal that no longer decodes** still counts as an unfinished
+      switch (with no account names), so it can't unblock switching by
+      accident. "I've fixed it" clears it.
+    - **Duplicate keys** inside `claudeAiOauth` (in Claude's item and in saved
+      logins) and inside `oauthAccount` (in saved logins and in
+      `~/.claude.json`) are now rejected at any depth, escaped spellings
+      included. Other members (`mcpOAuth`) keep theirs untouched. A duplicate
+      top-level key in `~/.claude.json` also makes the profile unreadable.
+    - `ClaudeItem.decodePassword` accepts leading JSON whitespace.
+    - New file `Model/PendingSwitch.swift` (the journal). `ProfileClient`
+      lives in `UsageClient.swift`, which stays the only network code.
+    - The status check runs at launch as well as on menu open. It reads, and
+      may call the profile endpoint, but never changes anything (Hard rule 2).

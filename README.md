@@ -17,19 +17,33 @@ from them. Compared with upstream:
   capture.
 - **No secret on a command line.** The app reads Claude Code's Keychain item
   with `security find-generic-password -w` (the secret comes back on stdout)
-  and writes it in-process with `SecItemUpdate`. It never creates or deletes
-  the item. The first switch asks you to let CCSwitcher change the item.
-  Because the build is signed ad hoc, macOS may ask again after each rebuild.
-  Approving adds CCSwitcher to the item's access list and leaves Claude Code's
-  access in place.
+  or, during a switch, in-process with `SecItemCopyMatching`, and writes it
+  in-process with `SecItemUpdate`. It never creates or deletes the item. The
+  first switch asks you to let CCSwitcher read the item; that dialog comes
+  before anything changes. Because the build is signed ad hoc, macOS may ask
+  again after each rebuild.
 - **The app never calls the OAuth token endpoint.** Claude Code refreshes its
   own tokens.
-- **One network request:** `GET https://api.anthropic.com/api/oauth/usage`. No
-  analytics, updater, pricing fetch or version check.
+- **Two network requests:** `GET https://api.anthropic.com/api/oauth/usage`
+  and `GET https://api.anthropic.com/api/oauth/profile`, through one ephemeral
+  session with no cache that refuses redirects. No analytics, updater,
+  pricing fetch or version check.
+- **It proves whose login it's saving.** Both logins share one email, so
+  before saving or backing up a login the app checks which organization it
+  belongs to: either the refresh token matches the one already saved for
+  that organization, or the profile endpoint says so for the (unexpired)
+  access token. Only the access token is sent. If neither works (an expired
+  token, no network), it changes nothing and tells you to use Claude Code once
+  so it refreshes. The menu also warns when the live login provably belongs to
+  a different organization than `~/.claude.json` names.
 - **A switch swaps only `claudeAiOauth`.** It keeps `mcpOAuth` and every other
   key in Claude Code's item byte for byte. Before writing, it backs up the
-  current login and reads the backup back. Afterward it verifies the result
-  and rolls back on failure.
+  current login (keeping the one it replaces, which Settings can restore) and
+  reads the backup back. Afterward it verifies the result and rolls back on
+  failure, unless Claude Code changed the item in the meantime.
+- **An interrupted switch is noticed.** If the app dies mid-switch, the next
+  launch blocks switching and asks whether to restore the previous login or
+  leave things as they are.
 - **No file logs.** Logging goes through `os.Logger`, with emails, org names
   and UUIDs marked private.
 - Removed: Sparkle, Aptabase, GRDB, the cost/activity stats, the desktop
@@ -62,6 +76,26 @@ item. It has no entitlements.
 
 The first switch shows a Keychain prompt. Since every build has a new ad hoc
 signature, macOS may ask again after each rebuild.
+
+## Known risks
+
+These remain after the hardening, because Claude Code offers nothing to
+coordinate with (no lock, no API for switching accounts):
+
+- **Token refresh race.** Claude Code can refresh and rotate its token at any
+  moment. The switch re-reads the Keychain item in-process and writes it right
+  after, with no process spawned in between, but a few milliseconds remain
+  between that read and the write. If Claude Code rotates the token in that
+  window, the switch overwrites the new token and the account you switched
+  away from needs `claude /login`. Rollback won't overwrite an item that
+  changed after the switch wrote it.
+- **`~/.claude.json` race.** The profile write re-checks the file's mtime,
+  size and inode right before renaming the new file over it, and retries up to
+  3 times. A write Claude Code makes between that last check and the rename
+  is still lost.
+- **The ownership check trusts one Anthropic endpoint** when the token
+  doesn't match a saved login. If the profile endpoint is unreachable, the
+  app refuses to save or switch rather than guess.
 
 ## Using it
 
