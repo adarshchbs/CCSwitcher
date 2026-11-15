@@ -206,16 +206,19 @@ def sessions_diagram():
 
 def install_diagram():
     parts = []
+    # One entry per step of the README's install prompt, numbered the same.
     steps = [
-        ("Check the Mac", "macOS, Xcode, brew"),
-        ("Clone", "this repo, from GitHub"),
-        ("Test", "throwaway keychain"),
-        ("Build", "Release, ad hoc signed"),
+        ("Check the Mac", "Xcode and brew"),
+        ("Clone", "from GitHub"),
+        ("Generate", "Xcode project"),
+        ("Test", "temp keychain"),
+        ("Build", "Release app"),
         ("Install", "~/Applications"),
-        ("Hand off", "you save your logins"),
+        ("Hand off", "you save logins"),
     ]
-    x0, gap, y = 40, 140, 58
-    parts.append(f'<line x1="{x0 + 14}" y1="{y}" x2="{x0 + 14 + gap * 5}" y2="{y}" stroke="{{line}}" stroke-width="1.5"/>')
+    x0, gap, y = 40, 117, 58
+    last = x0 + 14 + gap * (len(steps) - 1)
+    parts.append(f'<line x1="{x0 + 14}" y1="{y}" x2="{last}" y2="{y}" stroke="{{line}}" stroke-width="1.5"/>')
     for i, (title, sub) in enumerate(steps):
         x = x0 + 14 + gap * i
         last = i == len(steps) - 1
@@ -247,7 +250,7 @@ def install_diagram():
         ("Keychain item Claude Code-credentials", False),
         ("Your Claude sign-ins: you run them", False),
     ]))
-    return 900, 330, "".join(parts), "What the install prompt does: six steps, the network it uses, and what it never touches"
+    return 900, 330, "".join(parts), "What the install prompt does: seven steps, the network it uses, and what it never touches"
 
 
 # ---------------------------------------------------------------- upstream vs fork

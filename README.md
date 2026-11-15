@@ -27,7 +27,7 @@ Copy the [install prompt](#install-prompt) at the bottom of this page and paste 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/install-dark.svg">
-  <img src="docs/assets/install-light.svg" width="100%" alt="The install prompt's six steps: check the Mac, clone this repo, run the tests on a throwaway keychain, build, install to ~/Applications, hand off. It reaches only GitHub and, if xcodegen is missing, Homebrew. It never touches ~/.claude.json, ~/.claude/, the Claude Code-credentials Keychain item, or your Claude sign-ins.">
+  <img src="docs/assets/install-light.svg" width="100%" alt="The install prompt's seven steps: check the Mac, clone this repo, generate the Xcode project, run the tests on a throwaway keychain, build, install to ~/Applications, hand off. It reaches only GitHub and, if xcodegen is missing, Homebrew. It never touches ~/.claude.json, ~/.claude/, the Claude Code-credentials Keychain item, or your Claude sign-ins.">
 </picture>
 
 ## What one click does
@@ -79,6 +79,11 @@ Claude Code offers no lock or switching API, so these remain:
 </details>
 
 ## Install prompt
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/install-dark.svg">
+  <img src="docs/assets/install-light.svg" width="100%" alt="The seven steps below, in order: check the Mac, clone this repo, generate the Xcode project, run the tests on a throwaway keychain, build, install to ~/Applications, hand off. The prompt reaches only GitHub and, if xcodegen is missing, Homebrew. It never touches ~/.claude.json, ~/.claude/, the Claude Code-credentials Keychain item, or your Claude sign-ins.">
+</picture>
 
 Paste all of this into Claude Code or Codex. Paste it again later to update; saved logins survive a reinstall.
 
