@@ -21,6 +21,10 @@ protocol ClaudeItemAccess: Sendable {
     /// account across the keychain search list, and it is in the pinned
     /// keychain. Reads attributes only, so it never prompts.
     func requireUnique() throws
+    /// When the item last changed (`kSecAttrModificationDate`), from the
+    /// pinned keychain. Reads attributes only, so it never prompts. nil
+    /// when the item is missing.
+    func modificationDate() throws -> Date?
 }
 
 /// Runs `/usr/bin/security`. A protocol so tests can record what gets spawned.
@@ -183,6 +187,23 @@ struct ClaudeItem: ClaudeItemAccess, @unchecked Sendable {
         }
         guard found.count == 1, KeychainPin.canonical(found[0]) == KeychainPin.canonical(keychain.path) else {
             throw Failure.notUnique(found: found, expected: keychain.path)
+        }
+    }
+
+    func modificationDate() throws -> Date? {
+        var query = pinnedQuery()
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let attributes = result as? [String: Any] else { throw Failure.unreadableOutput }
+            return attributes[kSecAttrModificationDate as String] as? Date
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw Failure.searchFailed(status: status)
         }
     }
 

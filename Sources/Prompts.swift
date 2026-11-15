@@ -8,7 +8,13 @@ enum Prompts {
         alert.messageText = "Switch to \(label)?"
         let list = sessions.prefix(10).map { "• PID \($0.pid)  \($0.detail)" }.joined(separator: "\n")
         let more = sessions.count > 10 ? "\n• and \(sessions.count - 10) more" : ""
-        alert.informativeText = "Running Claude sessions may keep using the old account until restarted:\n\n\(list)\(more)"
+        alert.informativeText = """
+            \(sessions.count == 1 ? "This running Claude session" : "These \(sessions.count) running Claude sessions") \
+            can keep using the old account until restarted. Until then they can write it back to ~/.claude.json, and \
+            later to the Keychain when their token refreshes. Restart them after the switch to be sure they use \(label).
+
+            \(list)\(more)
+            """
         alert.addButton(withTitle: "Switch")
         alert.addButton(withTitle: "Cancel")
         return run(alert) == .alertFirstButtonReturn

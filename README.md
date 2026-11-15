@@ -100,6 +100,10 @@ coordinate with (no lock, no API for switching accounts):
   size and inode right before renaming the new file over it, and retries up to
   3 times. A write Claude Code makes between that last check and the rename
   is still lost.
+- **Running sessions keep, and can restore, the old login.** Claude Code
+  2.1.x watches the Keychain item and sometimes adopts a new login on its
+  own, but not reliably. A session that refreshes its old token writes that
+  login back. Restart Claude Code (or T3 Code) after a switch.
 - **The ownership check trusts one Anthropic endpoint** when the token
   doesn't match a saved login. If the profile endpoint is unreachable, the
   app refuses to save or switch rather than guess.
@@ -118,10 +122,35 @@ coordinate with (no lock, no API for switching accounts):
    running, the app lists them first, because they may keep using the old
    account until you restart them.
 
-The menu bar shows the first letter of the active account's name, or `?` when
-the current login isn't one you saved. Each row shows 5-hour and 7-day usage.
-The app reads usage when you open the menu (at most once a minute) or choose
-**Refresh usage**. When a saved token has expired, the row shows the last
-values it read, which update after you switch to that account. **Settings…**
-renames and removes accounts. Removing an account deletes its saved login and
-leaves the current Claude login alone.
+The menu bar shows the first letter of the active account's name, or a
+question mark when the current login isn't one you saved. The checkmark goes
+to the account that owns the token in the Keychain, the one new Claude
+sessions will use, and that row says "new sessions".
+
+Under each account the menu shows the limits Anthropic reports: Session,
+Weekly, and a per-model weekly row such as "Weekly · Fable", each with a bar
+and a percentage. Hover a row to see when it resets. Accounts on the Max 20x
+tier have no session limit, so their Session row is hidden. The app fetches
+usage once each time you open the menu, and again when you choose **Refresh
+usage**. It never polls. When a saved token has expired, the row shows the last
+values it read, dimmed with "as of HH:mm"; they update after you switch to that
+account.
+
+**Settings…** renames and removes accounts. Removing an account deletes its
+saved login and leaves the current Claude login alone.
+
+### After a switch
+
+A switch changes the login for **new** Claude Code sessions only. Each
+session reads its login when it starts and keeps it in memory, so:
+
+- Sessions that were already running keep using the old account until you
+  restart them. The menu counts them: "⚠︎ 3 Claude sessions started before
+  16:17 may still be using Team. Restart them to be sure they use Personal."
+- When an old session refreshes its token, it can write the old account
+  back to the Keychain and `~/.claude.json`. The menu then shows "Changed
+  outside CCSwitcher at HH:mm" or a `~/.claude.json` mismatch warning, with a
+  **Fix ~/.claude.json** item.
+
+There is no supported way to move a running session to the new login.
+Restart them; in T3 Code, quit and reopen the app.

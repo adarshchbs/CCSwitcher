@@ -25,6 +25,27 @@ final class StaticChecksTests: XCTestCase {
         return files
     }
 
+    /// No employer name anywhere in the repo's text files. The needle is
+    /// split so this file doesn't match itself.
+    func testNoEmployerName() throws {
+        let needle = "ky" + "zen"
+        let skip: Set<String> = [".git", "build", "CCSwitcher.xcodeproj", ".w"]
+        let textExtensions: Set<String> = ["swift", "md", "yml", "yaml", "json", "plist", "txt", "sh", ""]
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]))
+        var checked = 0
+        for case let url as URL in enumerator {
+            if skip.contains(url.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard textExtensions.contains(url.pathExtension),
+                  try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == false else { continue }
+            checked += 1
+            XCTAssertNil(try text(url).range(of: needle, options: .caseInsensitive), url.path)
+        }
+        XCTAssertGreaterThan(checked, 20)
+    }
+
     func testURLSessionOnlyInUsageClient() throws {
         let users = try sources().filter { try text($0).contains("URLSession") }.map(\.lastPathComponent)
         XCTAssertEqual(users, ["UsageClient.swift"])

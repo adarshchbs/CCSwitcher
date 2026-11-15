@@ -8,25 +8,19 @@ private let log = Logger(subsystem: "com.adarshchbs.ccswitcher", category: "AppM
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var accounts: [SavedAccount] = []
-    @Published private(set) var activeId: String?
-    @Published private(set) var usage: [String: AccountUsage] = [:]
     @Published private(set) var notice: String?
-    /// The live Keychain token provably belongs to a different organization
-    /// than `~/.claude.json` names. Shown as a warning; never fixed
-    /// automatically.
-    @Published private(set) var liveMismatch = false
     /// A switch that was interrupted before it verified or rolled back.
     @Published private(set) var unfinished: PendingSwitch?
     /// Set while `claude auth login` waits for the browser; "Cancel sign-in"
     /// cancels it.
     @Published private(set) var signingIn: LoginCancellation?
 
+    /// The live owner, usage, history and running sessions.
+    let status: AccountStatus
+
     private let switcher: Switcher
-    private let usageClient: UsageClient
-    private let cache: UsageCache
     private let clock: Clock = SystemClock()
-    private var lastUsageFetch: Date?
-    private var backoffUntil: Date?
+    private var menuReload: Task<Void, Never>?
 
     init() {
         let defaults = UserDefaults.standard
@@ -41,20 +35,28 @@ final class AppModel: ObservableObject {
                             sessions: SessionGuard(), lookup: ProfileClient(http: http), clock: clock,
                             journal: DefaultsSwitchJournal(defaults: defaults),
                             cli: ClaudeCLI.standard(), login: ProcessLoginRunner())
-        usageClient = UsageClient(http: http, clock: clock)
-        cache = UsageCache(defaults: defaults)
-
-        // The menu-style MenuBarExtra is an NSMenu: refresh when it opens.
-        NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification,
-                                               object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.menuOpened() }
+        do {
+            status = try AccountStatus(source: switcher, client: UsageClient(http: http, clock: clock),
+                                       cache: UsageCache(defaults: defaults), history: DefaultsLoginHistory(defaults: defaults),
+                                       sessions: SessionGuard(), clock: clock)
+        } catch {
+            fatalError("Can't read the usage cache or login history: \(error)")
         }
+        // At launch: the owner only, for the icon. No usage fetch.
         Task {
             await reload()
             _ = await resolveUnfinishedSwitch()
-            await checkLiveStatus()
+            await reloadLive(expecting: nil)
         }
     }
+
+    /// The account with the checkmark: the live token's proven owner, or the
+    /// one `~/.claude.json` names when that can't be proven.
+    var activeId: String? { status.live?.activeId }
+
+    /// `~/.claude.json` names another organization than the live token's
+    /// proven owner. Shown as a warning; fixed only from a click.
+    var liveMismatch: Bool { status.live?.fileMismatch ?? false }
 
     /// The menu bar icon, an SF Symbol rendered as a template image so it
     /// matches the other menu bar icons:
@@ -82,26 +84,85 @@ final class AppModel: ObservableObject {
         return "Claude account: \(active.label)"
     }
 
-    func title(for account: SavedAccount) -> String {
-        let summary = (usage[account.id] ?? AccountUsage()).summary(now: clock.now())
-        return "\(account.label)    \(summary)"
+    /// The menu's rows for the current state.
+    func menuRows() -> [MenuRow] {
+        MenuRows.rows(MenuInput(accounts: accounts, live: status.live, usage: status.usage, fetching: status.fetching,
+                                sessions: status.sessions, externalChange: status.externalChange,
+                                signingIn: signingIn != nil, unfinished: unfinished != nil, notice: notice,
+                                now: clock.now()))
+    }
+
+    // MARK: - Menu open and Refresh: the only usage fetches
+
+    /// Called by the menu's delegate each time it opens: reloads the
+    /// account list and starts (or joins) a usage refresh.
+    func menuWillOpen() {
+        if menuReload == nil {
+            menuReload = Task {
+                await reload()
+                menuReload = nil
+            }
+        }
+        startUsageRefresh(showErrors: false)
+    }
+
+    /// The menu's "Refresh usage" item.
+    func refreshUsageNow() {
+        startUsageRefresh(showErrors: true)
+    }
+
+    private func startUsageRefresh(showErrors: Bool) {
+        let refresh = status.refresh(accountIds: accounts.map(\.id))
+        Task {
+            do {
+                try await refresh.value
+            } catch is CancellationError {
+                return
+            } catch SwitchError.busy {
+                // An operation is running; the next menu open reads again.
+                if showErrors { notice = SwitchError.busy.message }
+            } catch let error as SwitchError {
+                if showErrors { Prompts.show(error) } else { notice = error.message }
+            } catch {
+                Prompts.showUnexpected(error)
+            }
+        }
     }
 
     // MARK: - Menu actions
 
     func switchTo(_ account: SavedAccount) {
         let label = account.label
-        perform {
+        perform(expecting: .switch) {
             let outcome = try await self.switcher.switchTo(account.id) { sessions in
                 await Prompts.confirmSwitch(to: label, sessions: sessions)
             }
             log.info("Switch outcome: \(String(describing: outcome), privacy: .public)")
-            if outcome == .switched { self.lastUsageFetch = nil }
+        }
+    }
+
+    /// The menu's account row for `id`.
+    func switchTo(id: String) {
+        guard let account = accounts.first(where: { $0.id == id }) else { return }
+        switchTo(account)
+    }
+
+    /// "Fix ~/.claude.json": writes the proven owner's saved profile back.
+    /// Offered only when the owner is proven; runs only from this click.
+    func fixClaudeJSON() {
+        guard let ownerId = status.live?.fixableOwnerId else { return }
+        perform(expecting: nil) {
+            let outcome = try await self.switcher.fixClaudeJSON(ownerId: ownerId)
+            log.info("Fix outcome: \(String(describing: outcome), privacy: .public)")
+            if case .fixed(let account) = outcome {
+                Prompts.inform("Fixed ~/.claude.json", "It names \(account.label) again. Running Claude sessions may undo "
+                    + "this until you restart them.")
+            }
         }
     }
 
     func saveCurrentLogin() {
-        perform {
+        perform(expecting: nil) {
             let outcome = try await self.switcher.saveCurrentLogin { suggestion in
                 await Prompts.askLabel(suggestion: suggestion)
             }
@@ -118,7 +179,7 @@ final class AppModel: ObservableObject {
     /// user signed in to.
     func addAccount() {
         let cancellation = LoginCancellation()
-        perform(resolvingAfter: true) {
+        perform(resolvingAfter: true, expecting: .add) {
             defer { self.signingIn = nil }
             let outcome = try await self.switcher.addAccount(
                 confirm: { label in await Prompts.confirmAddAccount(current: label) },
@@ -127,10 +188,6 @@ final class AppModel: ObservableObject {
                 cancellation: cancellation)
             log.info("Add account outcome: \(String(describing: outcome), privacy: .public)")
             self.signingIn = nil
-            switch outcome {
-            case .added, .updated: self.lastUsageFetch = nil
-            case .unsaved, .notCompleted, .cancelled: break
-            }
             if let message = outcome.message { Prompts.inform(message.title, message.text) }
         }
     }
@@ -144,22 +201,18 @@ final class AppModel: ObservableObject {
         signingIn = cancellation
     }
 
-    func refreshUsageNow() {
-        Task { await refreshUsage(force: true) }
-    }
-
     func rename(_ account: SavedAccount, to label: String) {
-        perform { try await self.switcher.rename(account.id, to: label) }
+        perform(expecting: nil) { try await self.switcher.rename(account.id, to: label) }
     }
 
     func remove(_ account: SavedAccount) {
         guard Prompts.confirmRemove(account.label) else { return }
-        perform { try await self.switcher.remove(account.id) }
+        perform(expecting: nil) { try await self.switcher.remove(account.id) }
     }
 
     func restorePrevious(_ account: SavedAccount) {
         guard Prompts.confirmRestorePrevious(account.label) else { return }
-        perform {
+        perform(expecting: nil) {
             try await self.switcher.restorePrevious(account.id)
             Prompts.inform("Restored \(account.label)",
                            "The previous saved login is back. The one it replaced is now the previous login, so you can undo this the same way.")
@@ -171,24 +224,17 @@ final class AppModel: ObservableObject {
         Task {
             _ = await resolveUnfinishedSwitch()
             await reload()
+            await reloadLive(expecting: .switch)
         }
     }
 
-    // MARK: - Refresh
+    // MARK: - Reads
 
-    private func menuOpened() {
-        Task {
-            await reload()
-            await refreshUsage(force: false)
-        }
-    }
-
+    /// The account list, the journal and the notice. Reads only; no network.
     private func reload() async {
         do {
             accounts = try await switcher.savedAccounts()
-            activeId = try await switcher.liveOwner()?.id
             unfinished = try await switcher.unfinishedSwitch()
-            usage = try cache.load()
             notice = nil
         } catch let error as SwitchError {
             notice = error.message
@@ -197,48 +243,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Fetches usage at most once a minute, unless forced, and never while
-    /// backing off after a 429.
-    private func refreshUsage(force: Bool) async {
-        let now = clock.now()
-        if let until = backoffUntil, now < until {
-            if force { notice = "Usage is rate limited until \(until.formatted(date: .omitted, time: .shortened))." }
-            return
-        }
-        if !force, let last = lastUsageFetch, now.timeIntervalSince(last) < 60 { return }
-        lastUsageFetch = now
-        await checkLiveStatus()
-
+    /// The live owner (no usage), at launch and after a clicked operation.
+    private func reloadLive(expecting: LoginChange.Source?) async {
         do {
-            let tokens = try await switcher.usageTokens()
-            var updated = usage.filter { id, _ in accounts.contains { $0.id == id } }
-            for account in accounts {
-                guard let token = tokens[account.id] else { continue }
-                let result = try await usageClient.fetch(token)
-                updated[account.id] = (updated[account.id] ?? AccountUsage()).applying(result)
-                if case .rateLimited(let retryAfter) = result {
-                    backoffUntil = now.addingTimeInterval(retryAfter ?? 300)
-                    break
-                }
-            }
-            usage = updated
-            try cache.save(updated)
-        } catch is CancellationError {
-            return
-        } catch let error as SwitchError {
-            if force { Prompts.show(error) }
-        } catch {
-            Prompts.showUnexpected(error)
-        }
-    }
-
-    /// Whether the live token provably belongs to another org than the
-    /// profile names. Detection only.
-    private func checkLiveStatus() async {
-        do {
-            liveMismatch = try await switcher.liveLoginStatus() == .mismatch
+            try await status.reloadLive(expecting: expecting)
         } catch SwitchError.busy {
-            return  // An operation is running; the next menu open checks again.
+            return  // An operation is running; the next menu open reads again.
         } catch is CancellationError {
             return
         } catch let error as SwitchError {
@@ -286,14 +296,18 @@ final class AppModel: ObservableObject {
         } catch {
             Prompts.showUnexpected(error)
         }
-        lastUsageFetch = nil
+        await reloadLive(expecting: .switch)
         return true
     }
 
     /// `resolvingAfter`: if the operation leaves a journal behind (an Add
     /// account whose result couldn't be settled), show the recovery alert
     /// right away.
-    private func perform(resolvingAfter: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
+    /// `expecting`: the history source to record if the operation changes the
+    /// live owner. Never fetches usage: that happens on menu open and
+    /// Refresh only.
+    private func perform(resolvingAfter: Bool = false, expecting: LoginChange.Source?,
+                         _ operation: @escaping @MainActor () async throws -> Void) {
         Task {
             if await resolveUnfinishedSwitch() {
                 await reload()
@@ -310,7 +324,7 @@ final class AppModel: ObservableObject {
             if resolvingAfter, unfinished != nil, await resolveUnfinishedSwitch() {
                 await reload()
             }
-            await refreshUsage(force: false)
+            await reloadLive(expecting: expecting)
         }
     }
 }

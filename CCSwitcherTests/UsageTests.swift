@@ -71,12 +71,12 @@ final class UsageTests: XCTestCase {
         XCTAssertNil(request.httpBody)
 
         guard case .fresh(let snapshot) = result else { return XCTFail("\(result)") }
-        XCTAssertEqual(snapshot.fiveHour, 42.4)
-        XCTAssertEqual(snapshot.sevenDay, 63)
-        XCTAssertNotNil(snapshot.fiveHourResetsAt)
-        XCTAssertNotNil(snapshot.sevenDayResetsAt)
+        // No `limits`: the older windows become Session and Weekly.
+        XCTAssertEqual(snapshot.limits.map(\.label), ["Session", "Weekly"])
+        XCTAssertEqual(snapshot.limits.map(\.percent), [42.4, 63])
+        XCTAssertNotNil(snapshot.limits[0].resetsAt)
+        XCTAssertNotNil(snapshot.limits[1].resetsAt)
         XCTAssertEqual(snapshot.fetchedAt, now)
-        XCTAssertEqual(AccountUsage(snapshot: snapshot).summary(now: now), "5h 42% · 7d 63%")
     }
 
     func test429KeepsCachedValues() async throws {
@@ -84,19 +84,10 @@ final class UsageTests: XCTestCase {
         let result = try await client(http).fetch(valid)
         XCTAssertEqual(result, .rateLimited(retryAfter: 120))
 
-        let cached = AccountUsage(snapshot: UsageSnapshot(fiveHour: 3, fiveHourResetsAt: nil, sevenDay: 18,
-                                                          sevenDayResetsAt: nil, fetchedAt: now))
+        let cached = AccountUsage(snapshot: UsageSnapshot(limits: [UsageLimit(kind: "session", label: "Session", percent: 3,
+                                                                              severity: .normal, resetsAt: nil)],
+                                                          fetchedAt: now))
         XCTAssertEqual(cached.applying(result), cached)
-    }
-
-    func testSummaryShowsAgeAndExpiry() {
-        let fetched = now.addingTimeInterval(-3600)
-        let snapshot = UsageSnapshot(fiveHour: 3, fiveHourResetsAt: nil, sevenDay: 18, sevenDayResetsAt: nil, fetchedAt: fetched)
-        let time = fetched.formatted(date: .omitted, time: .shortened)
-        XCTAssertEqual(AccountUsage(snapshot: snapshot).summary(now: now), "5h 3% · 7d 18%  (as of \(time))")
-        XCTAssertEqual(AccountUsage(snapshot: snapshot, tokenExpired: true).summary(now: now),
-                       "5h 3% · 7d 18%  (as of \(time) · refreshes after switching)")
-        XCTAssertEqual(AccountUsage(snapshot: nil).summary(now: now), "usage unavailable")
     }
 
     func testUsageTokensUseLiveItemForActiveAccountAndStoredForOthers() async throws {
@@ -109,14 +100,14 @@ final class UsageTests: XCTestCase {
                                 lookup: FakeLookup(), clock: FixedClock(date: now), journal: FakeJournal(),
                                 cli: Fixture.noCLI, login: FakeLoginRunner())
 
-        let tokens = try await switcher.usageTokens()
+        let tokens = try await switcher.liveState().tokens
         XCTAssertEqual(tokens[Fixture.team.id]?.accessToken, "team-live-access")
         XCTAssertEqual(tokens[Fixture.personal.id]?.accessToken, "personal-access")
         XCTAssertTrue(item.writes.isEmpty)
         XCTAssertEqual(store.writes, 0)
 
         store.items[Fixture.personal.id] = nil
-        let partial = try await switcher.usageTokens()
+        let partial = try await switcher.liveState().tokens
         XCTAssertNil(partial[Fixture.personal.id])
         XCTAssertNotNil(partial[Fixture.team.id])
     }
@@ -125,10 +116,10 @@ final class UsageTests: XCTestCase {
 final class ProfileClientTests: XCTestCase {
     func testRequestShapeAndOrganization() async throws {
         let http = FakeHTTP(status: 200, body: """
-        {"account":{"uuid":"acct-1","email":"me@x.com"},"organization":{"uuid":"org-team","name":"Acme","organization_type":"claude_team"}}
+        {"account":{"uuid":"acct-1","email":"me@x.com"},"organization":{"uuid":"org-team","name":"Acme","organization_type":"claude_team","rate_limit_tier":"default_claude_max_20x"}}
         """)
         let result = try await ProfileClient(http: http).organization(accessToken: "access")
-        XCTAssertEqual(result, .organization(uuid: "org-team", name: "Acme"))
+        XCTAssertEqual(result, .organization(uuid: "org-team", name: "Acme", rateLimitTier: "default_claude_max_20x"))
         let request = try XCTUnwrap(http.requests.first)
         XCTAssertEqual(http.requests.count, 1)
         XCTAssertEqual(request.url, ProfileClient.url)

@@ -11,7 +11,12 @@ struct SavedAccount: Codable, Identifiable, Equatable, Sendable {
     var email: String
     var orgUuid: String
     var orgName: String?
+    /// `subscriptionType` from the login (`team`, `max`, …).
     var plan: String?
+    /// The rate-limit tier (`default_claude_max_20x`, …), from the login,
+    /// `~/.claude.json` or the profile endpoint. Absent in accounts saved
+    /// before it was recorded; filled in on the next proven profile check.
+    var rateLimitTier: String? = nil
 }
 
 extension SavedAccount {
@@ -39,6 +44,8 @@ struct OAuthProfile: Sendable {
     var organizationUuid: String? { string("organizationUuid") }
     var emailAddress: String? { string("emailAddress") }
     var organizationName: String? { string("organizationName") }
+    /// The organization's rate-limit tier, else the user's.
+    var rateLimitTier: String? { string("organizationRateLimitTier") ?? string("userRateLimitTier") }
 
     /// The block as canonical JSON (sorted keys), to tell whether two
     /// profiles hold the same fields.

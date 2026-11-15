@@ -29,6 +29,7 @@ enum SwitchError: Error, Equatable {
     case loginDidNotStart(String)
     case loginChangedBeforeAdd
     case newLoginUnverified(String)
+    case fixFailed(String)
 
     /// Why ownership can't be proven when the token is expired and matches no
     /// saved login.
@@ -41,7 +42,7 @@ enum SwitchError: Error, Equatable {
         case .unknownAccount: "That account is no longer saved."
         case .liveLoginUnreadable(let why): "Couldn't read the current Claude login: \(why)"
         case .ownerUnknown: "The current Claude login isn't saved. Save the current login first."
-        case .liveLoginMismatch: "Claude's Keychain item and ~/.claude.json disagree about the current login. Nothing was changed. Run `claude /login` and try again."
+        case .liveLoginMismatch: "Claude's Keychain item and ~/.claude.json disagree about the current login. Nothing was changed. If the menu offers Fix ~/.claude.json, use it; otherwise run `claude /login` and try again."
         case .ownershipUnverified(let why): "Can't confirm which organization the current Claude login belongs to: \(why) Nothing was changed."
         case .keychainAccessDenied(let why): "CCSwitcher couldn't read Claude's Keychain item, so nothing was changed (\(why)). Allow access when macOS asks."
         case .claudeItemNotUnique(let found, let expected):
@@ -65,6 +66,7 @@ enum SwitchError: Error, Equatable {
         case .loginDidNotStart(let why): "Couldn't start `claude auth login` (\(why))."
         case .loginChangedBeforeAdd: "The Claude login changed while the dialog was open. Nothing was changed. Try again."
         case .newLoginUnverified(let why): "Claude Code's login changed, but CCSwitcher can't confirm which organization the new login belongs to: \(why). Nothing was saved."
+        case .fixFailed(let why): "Couldn't update ~/.claude.json: \(why)"
         }
     }
 
@@ -131,15 +133,62 @@ enum RecoveryOutcome: Equatable, Sendable {
     case nothingPending
 }
 
-/// Whether the live Keychain token belongs to the organization
-/// `~/.claude.json` names. Detection only; nothing acts on it automatically.
-enum LiveLoginStatus: Equatable, Sendable {
-    case consistent
-    /// Provably a different organization: the token is another saved
-    /// account's, or the profile endpoint names another org.
-    case mismatch
-    /// Can't tell (expired token, network failure, no profile).
-    case unknown
+/// Who owns the live Keychain token.
+enum TokenOwner: Equatable, Sendable {
+    /// A saved account, proven by refresh-token match or the profile endpoint.
+    case account(String)
+    /// The profile endpoint names an organization no saved account has.
+    case unsavedOrg(uuid: String, name: String?)
+    /// Can't tell (unreadable item, expired token, network failure).
+    case unproven(String)
+}
+
+/// The live login as the menu shows it. See `Switcher.liveState()`.
+struct LiveState: Equatable, Sendable {
+    var owner: TokenOwner
+    /// The proven owner's organization.
+    var ownerOrgUuid: String?
+    /// The saved account `~/.claude.json` names, if any.
+    var fileAccountId: String?
+    var fileOrgUuid: String?
+    var fileOrgName: String?
+    /// The Keychain item's modification date.
+    var itemModifiedAt: Date?
+    /// A usage token per account, attributed by owner.
+    var tokens: [String: UsageToken]
+    /// When each account's saved access token expires.
+    var savedExpiry: [String: Date]
+
+    var ownerId: String? {
+        if case .account(let id) = owner { id } else { nil }
+    }
+
+    var isProven: Bool {
+        if case .unproven = owner { false } else { true }
+    }
+
+    /// The account with the checkmark: the proven owner, or (unverified)
+    /// the one `~/.claude.json` names when ownership can't be proven.
+    var activeId: String? {
+        isProven ? ownerId : fileAccountId
+    }
+
+    /// `~/.claude.json` names another organization than the token's
+    /// proven owner (a running session probably rewrote it).
+    var fileMismatch: Bool {
+        guard let ownerOrgUuid else { return false }
+        return ownerOrgUuid != fileOrgUuid
+    }
+
+    /// The fix needs a proven saved owner whose saved profile can be written.
+    var fixableOwnerId: String? {
+        fileMismatch ? ownerId : nil
+    }
+}
+
+enum FixOutcome: Equatable, Sendable {
+    case fixed(SavedAccount)
+    case alreadyConsistent
 }
 
 /// The only code that changes credentials. Runs one operation at a time and
@@ -210,37 +259,157 @@ actor Switcher {
         }
     }
 
-    /// A token per account for reading usage: the live item's for the
-    /// active account, the saved item's for the others. Accounts whose token
-    /// can't be read are left out and show as unavailable.
-    func usageTokens() throws -> [String: UsageToken] {
+    /// Who owns the live Keychain token, what `~/.claude.json` names, and a
+    /// usage token per account, attributed by owner. Reads only (plus the
+    /// rate-limit tier backfill below); may call the profile endpoint.
+    ///
+    /// The owner is proven by an exact refresh-token match with a saved
+    /// login, or else by the profile endpoint. Usage tokens:
+    /// - the proven owner gets the live token;
+    /// - every other account gets its own saved token;
+    /// - when the owner can't be proven, the account `~/.claude.json` names
+    ///   gets none (its cached rows show as stale), because the live token
+    ///   might be anyone's.
+    func liveState() async throws -> LiveState {
         guard !busy else { throw SwitchError.busy }
-        let owner = try liveOwner()
-        var tokens: [String: UsageToken] = [:]
-        for account in try loadAccounts() {
+        let saved = try loadAccounts()
+
+        var modifiedAt: Date?
+        do { modifiedAt = try item.modificationDate() } catch let error as ClaudeItem.Failure {
+            log.notice("Can't read the item's modification date: \(String(describing: error), privacy: .public)")
+        }
+        var fileOrg: String?
+        var fileOrgName: String?
+        do {
+            let profile = try config.readProfile()
+            fileOrg = profile.organizationUuid
+            fileOrgName = profile.organizationName
+        } catch let error where error is ClaudeConfig.Failure || error is Envelope.Failure || error is DecodingError {
+            log.notice("No profile in ~/.claude.json: \(String(describing: error), privacy: .public)")
+        }
+
+        // Each account's own saved tokens, when they read and match its org.
+        var stored: [String: OAuthLogin] = [:]
+        for account in saved {
             do {
-                let login = account.id == owner?.id
-                    ? try OAuthLogin(raw: Envelope(item.read()).claudeAiOauth())
-                    : try StoredLogin(decoding: store.read(id: account.id)).login()
-                tokens[account.id] = UsageToken(accessToken: login.accessToken, expiresAt: login.expiresAt)
+                let login = try StoredLogin(decoding: store.read(id: account.id))
+                guard login.profile.organizationUuid == account.orgUuid else { continue }
+                stored[account.id] = try login.login()
             } catch let error where Self.isReadFailure(error) {
-                log.notice("No usage token for \(account.id, privacy: .public): \(self.describe(error), privacy: .public)")
+                log.notice("No saved token for \(account.id, privacy: .public): \(self.describe(error), privacy: .public)")
             }
         }
-        return tokens
+
+        var live: OAuthLogin?
+        do { live = try OAuthLogin(raw: liveClaudeAiOauth(readItem())) } catch let error as SwitchError {
+            log.notice("Live login unreadable: \(error.message, privacy: .public)")
+        } catch let error where Self.isReadFailure(error) {
+            log.notice("Live login unreadable: \(self.describe(error), privacy: .public)")
+        }
+        let owner: TokenOwner
+        if let live {
+            owner = try await tokenOwner(of: live, stored: stored, saved: saved)
+        } else {
+            owner = .unproven("the current Claude login can't be read")
+        }
+
+        let fileAccount = saved.owner(ofOrg: fileOrg)
+        var tokens: [String: UsageToken] = [:]
+        for account in saved {
+            if case .account(let id) = owner, id == account.id, let live {
+                tokens[account.id] = UsageToken(accessToken: live.accessToken, expiresAt: live.expiresAt)
+                continue
+            }
+            if case .unproven = owner, account.id == fileAccount?.id { continue }
+            if let login = stored[account.id] {
+                tokens[account.id] = UsageToken(accessToken: login.accessToken, expiresAt: login.expiresAt)
+            }
+        }
+        let ownerOrg: String? = switch owner {
+        case .account(let id): saved.first { $0.id == id }?.orgUuid
+        case .unsavedOrg(let uuid, _): uuid
+        case .unproven: nil
+        }
+        return LiveState(owner: owner, ownerOrgUuid: ownerOrg, fileAccountId: fileAccount?.id, fileOrgUuid: fileOrg,
+                         fileOrgName: fileOrgName, itemModifiedAt: modifiedAt, tokens: tokens,
+                         savedExpiry: stored.compactMapValues(\.expiresAt))
     }
 
-    /// Checks the live token against the organization `~/.claude.json`
-    /// names. Reads only; a mismatch is reported, never fixed.
-    func liveLoginStatus() async throws -> LiveLoginStatus {
-        guard !busy else { throw SwitchError.busy }
-        let live: LiveLogin
-        do { live = try readLiveLogin() } catch SwitchError.liveLoginUnreadable { return .unknown }
-        guard let org = live.profile.organizationUuid else { return .unknown }
-        switch try await ownership(of: live.login, org: org, saved: try loadAccounts(), strict: false) {
-        case .proven: return .consistent
-        case .otherAccount, .otherOrg: return .mismatch
-        case .unprovable: return .unknown
+    /// The saved account whose saved refresh token is byte-equal to the
+    /// live one, else the one the profile endpoint names. Detection only:
+    /// unreadable saved logins are skipped, so the switch and the fix use
+    /// the strict `verifyOwner` instead.
+    private func tokenOwner(of live: OAuthLogin, stored: [String: OAuthLogin], saved: [SavedAccount]) async throws -> TokenOwner {
+        let matches = stored.filter { Self.sameBytes($0.value.refreshToken, live.refreshToken) }.map(\.key)
+        if matches.count == 1 { return .account(matches[0]) }
+        if matches.count > 1 { return .unproven("more than one saved login has this token") }
+        if live.isExpired(at: clock.now()) {
+            return .unproven("its access token has expired and it doesn't match a saved login")
+        }
+        switch try await lookup.organization(accessToken: live.accessToken) {
+        case .organization(let uuid, let name, let tier):
+            let owners = saved.filter { $0.orgUuid == uuid }
+            guard owners.count <= 1 else { return .unproven("more than one saved account has this organization") }
+            guard let owner = owners.first else { return .unsavedOrg(uuid: uuid, name: name) }
+            try backfillRateLimitTier(tier, for: owner.id)
+            return .account(owner.id)
+        case .unauthorized:
+            return .unproven("Anthropic rejected its access token")
+        case .failed(let why):
+            return .unproven("the organization check with Anthropic failed (\(why))")
+        }
+    }
+
+    /// Records the tier the profile endpoint just reported for a proven
+    /// owner. Metadata only. Skipped while an operation runs (it may be
+    /// rewriting the list); reloads the list right before writing, with no
+    /// suspension in between.
+    private func backfillRateLimitTier(_ tier: String?, for id: String) throws {
+        guard let tier, !tier.isEmpty, !busy else { return }
+        var current = try loadAccounts()
+        guard let index = current.firstIndex(where: { $0.id == id }), current[index].rateLimitTier != tier else { return }
+        current[index].rateLimitTier = tier
+        try saveAccounts(current)
+        log.info("Recorded the rate-limit tier for \(id, privacy: .public)")
+    }
+
+    // MARK: - Fix ~/.claude.json
+
+    /// Writes the proven owner's saved `oauthAccount` to `~/.claude.json`
+    /// when a running Claude session put another account's back. Runs only
+    /// from a click. The live token must still provably belong to
+    /// `ownerId` (strict check, as for a switch); the Keychain item isn't
+    /// touched.
+    func fixClaudeJSON(ownerId: String) async throws -> FixOutcome {
+        try begin()
+        defer { busy = false }
+
+        let saved = try loadAccounts()
+        guard let owner = saved.first(where: { $0.id == ownerId }) else { throw SwitchError.unknownAccount }
+        let live = try readLiveLogin()
+        if live.profile.organizationUuid == owner.orgUuid { return .alreadyConsistent }
+        try await verifyOwner(live.login, org: owner.orgUuid, saved: saved)
+        let profile = try storedLogin(for: owner).profile
+
+        // The token may have changed during the ownership check.
+        let again = try readLiveLogin()
+        guard Self.sameBytes(again.login.refreshToken, live.login.refreshToken) else { throw SwitchError.liveLoginKeptChanging }
+        do { try config.writeProfile(profile) } catch { throw SwitchError.fixFailed(describe(error)) }
+        let written: OAuthProfile
+        do { written = try config.readProfile() } catch { throw SwitchError.fixFailed(describe(error)) }
+        guard written.organizationUuid == owner.orgUuid else {
+            throw SwitchError.fixFailed("~/.claude.json still names another organization")
+        }
+        log.info("Fixed ~/.claude.json for \(owner.id, privacy: .public)")
+        return .fixed(owner)
+    }
+
+    /// The Keychain item's modification date, read as an attribute (no
+    /// prompt). For the login-change history after an operation.
+    func itemModificationDate() -> Date? {
+        do { return try item.modificationDate() } catch {
+            log.notice("Can't read the item's modification date: \(self.describe(error), privacy: .public)")
+            return nil
         }
     }
 
@@ -406,7 +575,7 @@ actor Switcher {
             throw SwitchError.newLoginUnverified("its access token has already expired")
         }
         switch try await lookup.organization(accessToken: login.accessToken) {
-        case .organization(let uuid, let name):
+        case .organization(let uuid, let name, _):
             guard uuid == org else {
                 log.error("Profile endpoint names another organization than ~/.claude.json: \(name ?? "?", privacy: .private)")
                 throw SwitchError.liveLoginMismatch
@@ -702,7 +871,7 @@ actor Switcher {
             return .unprovable(SwitchError.expiredAndUnmatched)
         }
         switch try await lookup.organization(accessToken: login.accessToken) {
-        case .organization(let uuid, let name):
+        case .organization(let uuid, let name, _):
             return uuid == org ? .proven : .otherOrg(name)
         case .unauthorized:
             return .unprovable(SwitchError.expiredAndUnmatched)
@@ -877,6 +1046,7 @@ actor Switcher {
         account.email = live.profile.emailAddress ?? account.email
         account.orgName = live.profile.organizationName
         account.plan = live.login.subscriptionType
+        account.rateLimitTier = live.login.rateLimitTier ?? live.profile.rateLimitTier ?? account.rateLimitTier
         if let index = saved.firstIndex(where: { $0.id == account.id }) {
             saved[index] = account
         } else {

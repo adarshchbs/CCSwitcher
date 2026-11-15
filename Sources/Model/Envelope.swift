@@ -84,6 +84,7 @@ struct OAuthLogin: Equatable, Sendable {
     /// `expiresAt` is milliseconds since 1970 in Claude Code's format.
     let expiresAt: Date?
     let subscriptionType: String?
+    let rateLimitTier: String?
 
     /// Parses a raw `claudeAiOauth` value. Both tokens must be non-empty: an
     /// envelope with empty tokens (left behind by a logout) is not a login.
@@ -102,6 +103,11 @@ struct OAuthLogin: Equatable, Sendable {
         refreshToken = refresh
         expiresAt = (object["expiresAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
         subscriptionType = object["subscriptionType"] as? String
+        rateLimitTier = object["rateLimitTier"] as? String
+    }
+
+    func isExpired(at now: Date) -> Bool {
+        expiresAt.map { $0 <= now } ?? false
     }
 }
 

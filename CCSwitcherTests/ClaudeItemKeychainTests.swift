@@ -39,6 +39,16 @@ final class ClaudeItemKeychainTests: XCTestCase {
                                          value: String(decoding: data, as: UTF8.self))
     }
 
+    /// The modification date comes from attributes only: no data read, no
+    /// `security` process, so it can't prompt.
+    func testModificationDateReadsAttributesOnly() throws {
+        XCTAssertNil(try item.modificationDate())
+        try seed(Data(#"{"v":0}"#.utf8))
+        let date = try XCTUnwrap(try item.modificationDate())
+        XCTAssertLessThan(abs(date.timeIntervalSinceNow), 300)
+        XCTAssertTrue(runner.calls.isEmpty)
+    }
+
     /// Claude Code keeps reading its item through `security` after a switch,
     /// so an update must change the data and nothing else about the item.
     func testUpdateLeavesAccessListUnchanged() throws {

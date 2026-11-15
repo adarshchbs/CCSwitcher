@@ -20,6 +20,7 @@ final class FakeItem: ClaudeItemAccess, @unchecked Sendable {
     var onWrite: ((FakeItem, Int) -> Void)?
     var preauthorizeError: Error?
     var uniqueError: Error?
+    var modifiedAt: Date?
 
     init(_ data: Data?) { self.data = data }
 
@@ -49,6 +50,10 @@ final class FakeItem: ClaudeItemAccess, @unchecked Sendable {
 
     func requireUnique() throws {
         if let uniqueError { throw uniqueError }
+    }
+
+    func modificationDate() throws -> Date? {
+        lock.withLock { modifiedAt }
     }
 
     private func readLocked() throws -> Data {
@@ -188,6 +193,12 @@ final class FakeLoginRunner: LoginRunning, @unchecked Sendable {
         await onRun?()
         return end
     }
+}
+
+struct FakeStartTimes: ProcessStartTimes {
+    let times: [Int32: Date]
+    init(_ times: [Int32: Date]) { self.times = times }
+    func startTime(of pid: Int32) -> Date? { times[pid] }
 }
 
 struct TestFailure: Error {}

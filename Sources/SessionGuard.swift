@@ -9,6 +9,25 @@ struct LiveSession: Equatable, Sendable {
     let pid: Int32
     /// The session's working directory, or the executable path.
     let detail: String
+    /// When the process started, or nil when it can't be read. Claude Code
+    /// loads its login at startup, so this tells which account it got.
+    var startedAt: Date? = nil
+}
+
+/// Start times of running processes. A protocol so tests use fakes.
+protocol ProcessStartTimes: Sendable {
+    func startTime(of pid: Int32) -> Date?
+}
+
+/// Start times from `proc_pidinfo(PROC_PIDTBSDINFO)`. Reads kernel process
+/// info only; spawns nothing.
+struct LibprocStartTimes: ProcessStartTimes {
+    func startTime(of pid: Int32) -> Date? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+    }
 }
 
 protocol SessionListing: Sendable {
@@ -22,13 +41,16 @@ struct SessionGuard: SessionListing {
     /// Running processes. Injectable for tests.
     let processes: @Sendable () -> [RunningProcess]
     let isAlive: @Sendable (Int32) -> Bool
+    let startTimes: ProcessStartTimes
 
     init(sessionsDirectory: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/sessions"),
          processes: @escaping @Sendable () -> [RunningProcess] = SessionGuard.runningProcesses,
-         isAlive: @escaping @Sendable (Int32) -> Bool = SessionGuard.isProcessAlive) {
+         isAlive: @escaping @Sendable (Int32) -> Bool = SessionGuard.isProcessAlive,
+         startTimes: ProcessStartTimes = LibprocStartTimes()) {
         self.sessionsDirectory = sessionsDirectory
         self.processes = processes
         self.isAlive = isAlive
+        self.startTimes = startTimes
     }
 
     func liveSessions() -> [LiveSession] {
@@ -40,7 +62,11 @@ struct SessionGuard: SessionListing {
         for session in sessionFiles() where isAlive(session.pid) {
             found[session.pid] = LiveSession(pid: session.pid, detail: session.cwd ?? found[session.pid]?.detail ?? "")
         }
-        return found.values.sorted { $0.pid < $1.pid }
+        return found.values.sorted { $0.pid < $1.pid }.map { session in
+            var session = session
+            session.startedAt = startTimes.startTime(of: session.pid)
+            return session
+        }
     }
 
     private struct SessionFile: Decodable {

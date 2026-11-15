@@ -516,22 +516,26 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(store.items[Fixture.team.id], Data("garbage".utf8))
     }
 
-    func testLiveStatusDetectsATokenFromAnotherOrg() async throws {
-        let consistent = try await makeSwitcher().liveLoginStatus()
-        XCTAssertEqual(consistent, .consistent)
+    func testLiveStateDetectsATokenFromAnotherOrg() async throws {
+        let consistent = try await makeSwitcher().liveState()
+        XCTAssertEqual(consistent.owner, .account(Fixture.team.id))
+        XCTAssertFalse(consistent.fileMismatch)
 
         lookup.prefixes = ["team-live": "org-personal"]
-        let mismatch = try await makeSwitcher().liveLoginStatus()
-        XCTAssertEqual(mismatch, .mismatch)
+        let mismatch = try await makeSwitcher().liveState()
+        XCTAssertEqual(mismatch.owner, .account(Fixture.personal.id))
+        XCTAssertTrue(mismatch.fileMismatch)
 
         lookup.result = .failed("offline")
-        let unknown = try await makeSwitcher().liveLoginStatus()
-        XCTAssertEqual(unknown, .unknown)
+        let unknown = try await makeSwitcher().liveState()
+        guard case .unproven = unknown.owner else { return XCTFail("\(unknown.owner)") }
+        XCTAssertFalse(unknown.fileMismatch)
 
         // Personal's saved tokens under Team's profile: provable without the network.
         item.data = Fixture.envelope(Fixture.oauth("personal"))
-        let crossed = try await makeSwitcher().liveLoginStatus()
-        XCTAssertEqual(crossed, .mismatch)
+        let crossed = try await makeSwitcher().liveState()
+        XCTAssertEqual(crossed.owner, .account(Fixture.personal.id))
+        XCTAssertTrue(crossed.fileMismatch)
         // Detection only.
         assertNothingChanged()
     }
@@ -540,12 +544,12 @@ final class SwitcherTests: XCTestCase {
         accounts.accounts = [Fixture.personal]
         let outcome = try await makeSwitcher().saveCurrentLogin { suggestion in
             XCTAssertEqual(suggestion, "ORG-TEAM")
-            return "  Acme  "
+            return "  Work  "
         }
         guard case .added(let account) = outcome else { return XCTFail("\(outcome)") }
-        XCTAssertEqual(account.label, "Acme")
+        XCTAssertEqual(account.label, "Work")
         XCTAssertEqual(account.orgUuid, "org-team")
-        XCTAssertEqual(accounts.accounts.map(\.label), ["Personal", "Acme"])
+        XCTAssertEqual(accounts.accounts.map(\.label), ["Personal", "Work"])
         XCTAssertNotNil(store.items[account.id])
     }
 
@@ -563,7 +567,7 @@ final class SwitcherTests: XCTestCase {
         await assertThrows(.loginChangedDuringSave) {
             try await self.makeSwitcher().saveCurrentLogin { _ in
                 config.profile = Fixture.profile(org: "org-other")
-                return "Acme"
+                return "Work"
             }
         }
         XCTAssertEqual(store.writes, 0)
@@ -618,15 +622,19 @@ final class SessionGuardTests: XCTestCase {
                 RunningProcess(pid: 101, name: "node", path: "/usr/local/bin/node"),
                 RunningProcess(pid: 102, name: "x", path: "/opt/bin/claude"),
             ]},
-            isAlive: { $0 == 200 }
+            isAlive: { $0 == 200 },
+            startTimes: FakeStartTimes([100: Date(timeIntervalSince1970: 1000), 200: Date(timeIntervalSince1970: 2000)])
         )
         XCTAssertEqual(guardian.liveSessions().map(\.pid), [100, 102, 200])
         XCTAssertEqual(guardian.liveSessions().last?.detail, "/work/app")
+        // Start times come from the injected reader; unreadable ones are nil.
+        XCTAssertEqual(guardian.liveSessions().map(\.startedAt),
+                       [Date(timeIntervalSince1970: 1000), nil, Date(timeIntervalSince1970: 2000)])
     }
 
     func testMissingSessionsDirectoryIsFine() {
         let guardian = SessionGuard(sessionsDirectory: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"),
-                                    processes: { [] }, isAlive: { _ in true })
+                                    processes: { [] }, isAlive: { _ in true }, startTimes: FakeStartTimes([:]))
         XCTAssertEqual(guardian.liveSessions(), [])
     }
 }
