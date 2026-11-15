@@ -54,6 +54,11 @@ struct UsageClient: Sendable {
     let http: HTTPGetting
     let clock: Clock
 
+    init(http: HTTPGetting = URLSessionHTTP(), clock: Clock) {
+        self.http = http
+        self.clock = clock
+    }
+
     func fetch(_ token: UsageToken) async throws -> UsageResult {
         if let expiresAt = token.expiresAt, expiresAt <= clock.now() { return .expired }
 
