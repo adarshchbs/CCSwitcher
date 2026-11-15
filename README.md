@@ -10,10 +10,7 @@
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-dark.png">
-    <img src="docs/assets/ui-light.png" width="392" alt="The CCSwitcher panel: Team and Personal accounts, each with Session and Weekly usage bars showing how much is left. Personal is active and tagged new sessions.">
-  </picture>
+  <img src="docs/assets/ui.png" width="760" alt="The CCSwitcher panel in light mode (left) and dark mode (right): Team and Personal accounts, each with Session and Weekly usage bars showing how much is left. Personal is active and tagged new sessions.">
 </p>
 
 <p align="center">

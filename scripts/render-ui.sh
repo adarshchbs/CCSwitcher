@@ -8,4 +8,4 @@ files=(Sources/**/*.swift(N))
 files=(${files:#Sources/(App|AppModel|Prompts|StatusPanel).swift})
 xcrun swiftc -O -o "$tmp/render" "${files[@]}" scripts/render-ui/main.swift
 "$tmp/render" docs/assets
-echo "wrote docs/assets/ui-light.png and docs/assets/ui-dark.png"
+echo "wrote docs/assets/ui.png"
