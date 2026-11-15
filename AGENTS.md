@@ -1,18 +1,15 @@
-# CCSwitcher Agent Guidelines
+# CCSwitcher (manual-only hardened fork): agent guidelines
 
-**Rules**:
-- `project.yml` is the ONLY source of truth. NEVER edit `.pbxproj` or `Info.plist` directly. Run `xcodegen generate` after changes.
-- `CCSwitcher.xcodeproj` is disposable (git-ignored).
+**Rules**
+- `docs/FORK_SPEC.md` is the spec. Every rule there came out of a security audit; don't relax one without asking.
+- `project.yml` is the only source of truth for the Xcode project. Never edit `.pbxproj` or `Info.plist`; run `xcodegen generate` after changes. `CCSwitcher.xcodeproj` is disposable (git-ignored).
+- Tests must never touch the login keychain, Claude Code's `Claude Code-credentials` item, `~/.claude.json` or `~/.claude/`. Use `TempKeychain`, temp files and the fakes in `CCSwitcherTests/Fakes.swift`.
+- Never launch the app from an agent session.
 
-**App**: Minimalist macOS menu bar app for managing/switching Claude Code accounts.
-**Features**: Terminal-free login (Process/Pipe interception), zero-interaction token refresh (`security` CLI workaround), API usage tracking.
-
-**Architecture & Files**:
-- **Docs**: `ARCHITECTURE.md` (token flow), `BUILD_GUIDE.md`, `project.yml` (Xcode config).
-- **Entry**: `CCSwitcherApp.swift` (MenuBarExtra, lifecycle), `AppState.swift` (@MainActor state).
-- **Services**: 
-  - `ClaudeService.swift`: Wraps `claude` CLI (auth/status).
-  - `KeychainService.swift`: Manages OAuth tokens via `/usr/bin/security`.
-  - `*Parser.swift`: Parses `~/.claude/` JSON caches (Activity/Cost/Stats).
-- **Models**: `Account.swift`, `*Data.swift` (usage/cost/activity).
-- **Views**: `MainMenuView.swift` (dropdown), `SettingsView.swift` (native window), `HiddenWindowView.swift` (LSUIElement keepalive workaround).
+**Files** (`Sources/`)
+- `App.swift`: `MenuBarExtra` menu and the Settings window. `AppModel.swift`: menu state and actions. `Prompts.swift`: modal alerts.
+- `Switcher.swift`: the only code that changes credentials (save, switch, remove, rename).
+- `Keychain/ClaudeItem.swift`: Claude Code's item via `/usr/bin/security`. `Keychain/AccountStore.swift`: one Keychain item per saved account.
+- `ClaudeConfig.swift`: the `oauthAccount` block of `~/.claude.json`.
+- `Model/Envelope.swift`: splices `claudeAiOauth` into the item's JSON without touching other bytes.
+- `UsageClient.swift`: the only network code. `SessionGuard.swift`: running Claude Code processes.

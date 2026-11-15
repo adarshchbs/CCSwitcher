@@ -284,3 +284,82 @@ Add a short "About this fork" section at the top:
 - how to build: `brew install xcodegen && xcodegen && xcodebuild ...`
 - the first switch shows a Keychain prompt. Since the build is signed ad hoc,
   you may be asked again after each rebuild.
+
+## Deviations
+
+Places where the implementation differs from the text above, and why.
+
+1. **`security -i` can't take a 16 KB payload.** `security -i` reads its
+   input in 4096-byte chunks. A longer line gets split, and each piece runs as
+   its own command. The first piece is a valid `add-generic-password` with a
+   truncated `-X` value and no keychain argument, so it writes a corrupt
+   password to the default keychain. (Seen while probing: a cut-off test
+   command wrote a junk item to the login keychain.) Changes:
+   - `ClaudeItem` refuses any command line over 4000 bytes (`maxCommandBytes`)
+     before it starts `security`. With the real service name and a short
+     account name, that allows an envelope of about 1,960 bytes of JSON.
+   - Before writing anything, `Switcher` checks that both the new envelope
+     and the rollback envelope fit. If either doesn't, the switch aborts with
+     `tooLargeToWrite` and nothing has changed.
+   - The 16 KB round-trip test became two tests. One round-trips the largest
+     payload that fits, with quotes, spaces and unicode. The other checks that
+     a 16 KB payload is refused without starting `security`.
+   - **Open decision:** if Claude Code's real envelope (with `mcpOAuth`
+     entries) is larger than about 1.9 KB, every switch will be refused. The
+     alternative that keeps secrets out of argv is writing the item
+     in-process with `SecItemUpdate`. That changes which process the item's
+     ACL sees, and it brings Keychain prompts that may need the login
+     password. It needs the owner's call, so it isn't implemented.
+2. **`find-generic-password -w` prints hex for non-ASCII data.** When the
+   password isn't printable ASCII, `security` prints it as hex. `ClaudeItem`
+   decodes the output as hex when it doesn't start with `{`.
+3. **Usage runs partly outside `Switcher`.** Reading the tokens runs on the
+   `Switcher` actor and is refused while another operation is running. It
+   doesn't mark the switcher busy, though, and the HTTP requests run outside
+   the actor, so a slow request never blocks or rejects a switch.
+4. **Rollback is judged by verification.** The rollback attempts both writes
+   (item, then profile) even if one fails, then verifies the restored state:
+   the refresh token, plus `organizationUuid`. A write that failed before
+   changing anything still counts as a successful rollback. A failed
+   verification shows the blocking alert.
+5. **Extra fail-closed check.** The switch aborts (`liveLoginMismatch`) when
+   the live item already holds the target's refresh token while
+   `oauthAccount` names a different account, because then it's unclear who
+   owns the live credential.
+6. **Owner detection.** If more than one saved account has the same
+   `organizationUuid`, the owner counts as unknown. (Save never creates such
+   duplicates.)
+7. **Files beyond the architecture tree.** These were added:
+   - `AppModel.swift` (menu state and actions)
+   - `Prompts.swift` (NSAlert dialogs)
+   - `Model/AnyCodable.swift`
+   - `StoredLogin`, the saved item's format, in `AccountStore.swift`
+
+   `AccountStore` takes an optional `SecKeychain` so tests can aim it at a
+   temp keychain. It also sets `kSecUseDataProtectionKeychain: false`, so
+   items always go to the file-based login keychain.
+8. **`~/.claude.json` writer.** The check before the rename compares the
+   modification time (to the nanosecond), size and inode. The temp file is
+   created with `O_EXCL` and mode 0600, then given the original file's mode.
+   (Upstream's temp file briefly had the default umask permissions.)
+9. **Session detection.** Besides executables named `claude`, a process
+   whose start name (`p_comm`) is `claude` also counts. Claude Code's native
+   installer runs a versioned binary through a `claude` symlink.
+10. **Menu row layout.** SwiftUI menu items are one line, so usage sits on the
+    account's row (as in the menu sketch) instead of under the name.
+11. **Static checks go further.** They also require the usage endpoint to be
+    the only URL in the sources, and they ban `Timer`, `didWakeNotification`,
+    `CFBundleURLTypes`, `WidgetKit`, `AppIntents`, `zsh`, `print(`, `NSLog(`
+    and `.environment`.
+12. **Docs.** The README was replaced, not prepended to. Upstream's version
+    describes features that no longer exist (widgets, auto-update, analytics,
+    the login flow). Upstream-only docs, release tooling and screenshots were
+    deleted with the features: `ARCHITECTURE.md`, `BUILD_GUIDE.md`,
+    `MACOS_APP_PLAYBOOK.md`, `COST_VERIFICATION.md`, `RELEASE_NOTES.md`, the
+    translated READMEs, `docs/` except this spec, `scripts/release.sh` and
+    `.claude/commands/release.md`. `AGENTS.md` now describes the fork.
+13. **No `get-task-allow` in Release.** Xcode adds the
+    `com.apple.security.get-task-allow` entitlement to ad hoc builds, which
+    would let other processes attach to the app and read its memory.
+    `project.yml` sets `CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO` for Release,
+    so the Release app has no entitlements at all.

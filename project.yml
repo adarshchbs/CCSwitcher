@@ -41,6 +41,12 @@ targets:
         # Code's Keychain item. No entitlements file.
         ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: YES
+      configs:
+        # Xcode adds get-task-allow to ad hoc builds, which lets other
+        # processes attach to the app and read its memory (tokens included).
+        # Keep it for Debug only.
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
   # The tests compile the app's logic directly instead of loading it into the
   # app: a hosted test bundle would launch CCSwitcher, and the app must never
