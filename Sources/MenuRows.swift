@@ -41,10 +41,14 @@ struct AccountLine: Equatable {
 struct UsageLine: Equatable {
     var key: String
     var label: String
+    /// Percent used, as the API reports it.
     var percent: Double
     var severity: UsageSeverity
     var stale: Bool
     var tooltip: String?
+
+    /// Percent left, 0–100: what the menu shows, like T3 Code's usage panel.
+    var remaining: Double { min(max(100 - percent, 0), 100) }
 }
 
 struct NoteLine: Equatable {

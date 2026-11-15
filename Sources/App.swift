@@ -33,8 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// ```
 /// Claude Account
 /// ✓ Team  new sessions                 (spinner while fetching)
-///     Session          ██████░░░░   41%
-///     Weekly           █░░░░░░░░░    7%
+///     Session          ██████░░░░   59%   (percent left)
+///     Weekly           █████████░   93%
 ///   Personal                           as of 14:02
 ///     2 running sessions started before the switch
 ///     Session ...  (dimmed when stale)
@@ -368,7 +368,7 @@ final class AccountRowView: NSView {
     }
 }
 
-/// "Weekly · Fable   ████████░░   93%". Not clickable, never highlighted.
+/// "Weekly · Fable   █████████░   93%" (percent left). Not clickable, never highlighted.
 final class UsageRowView: NSView {
     private let label = NSTextField(labelWithString: "")
     private let bar = UsageBarView()
@@ -389,15 +389,17 @@ final class UsageRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// Shows what's left, not what's used: 7% used reads "93%" with the bar
+    /// 93% full, as in T3 Code.
     func configure(_ line: UsageLine) {
-        let value = Int(line.percent.rounded())
+        let value = Int(line.remaining.rounded())
         label.stringValue = line.label
         percent.stringValue = "\(value)%"
-        bar.fraction = min(max(line.percent / 100, 0), 1)
+        bar.fraction = line.remaining / 100
         bar.severity = line.severity
         alphaValue = line.stale ? 0.45 : 1
         toolTip = line.tooltip
-        setAccessibilityLabel("\(line.label) \(value) percent\(line.stale ? ", stale" : "")")
+        setAccessibilityLabel("\(line.label) \(value) percent left\(line.stale ? ", stale" : "")")
     }
 
     override func layout() {

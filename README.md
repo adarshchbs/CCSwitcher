@@ -129,7 +129,7 @@ sessions will use, and that row says "new sessions".
 
 Under each account the menu shows the limits Anthropic reports: Session,
 Weekly, and a per-model weekly row such as "Weekly · Fable", each with a bar
-and a percentage. Hover a row to see when it resets. Accounts on the Max 20x
+showing how much is left, as T3 Code does (7% used shows as 93%). Hover a row to see when it resets. Accounts on the Max 20x
 tier have no session limit, so their Session row is hidden. The app fetches
 usage once each time you open the menu, and again when you choose **Refresh
 usage**. It never polls. When a saved token has expired, the row shows the last

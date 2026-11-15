@@ -405,4 +405,15 @@ final class RunningSessionsTests: XCTestCase {
         let usage = MenuRows.rows(menu).compactMap { if case .usage(let line) = $0 { line.key + "=" + line.label } else { nil } }
         XCTAssertEqual(usage, ["\(ultra.id):0=Weekly", "\(Fixture.personal.id):0=Session", "\(Fixture.personal.id):1=Weekly"])
     }
+
+    func testUsageLineShowsWhatIsLeft() {
+        func line(_ used: Double) -> UsageLine {
+            UsageLine(key: "k", label: "Weekly", percent: used, severity: .normal, stale: false, tooltip: nil)
+        }
+        XCTAssertEqual(line(7).remaining, 93)
+        XCTAssertEqual(line(0).remaining, 100)
+        XCTAssertEqual(line(100).remaining, 0)
+        XCTAssertEqual(line(130).remaining, 0)
+        XCTAssertEqual(line(-5).remaining, 100)
+    }
 }
