@@ -35,7 +35,7 @@ final class ClaudeJSONRewriteTests: XCTestCase {
 
     private func rewrite(_ json: String) throws -> [String: Any] {
         let decoded = try JSONDecoder().decode([String: AnyCodable].self, from: Data(json.utf8))
-        let data = try KeychainService.claudeJSON(decoded, replacingOAuthAccount: replacement)
+        let data = try ClaudeConfig.claudeJSON(decoded, replacingOAuthAccount: replacement)
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
