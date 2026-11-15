@@ -1,7 +1,7 @@
 """Draws the README's two "how it works" diagrams as SVG, light and dark.
 
 Run from the repo root: python3 scripts/diagrams.py
-Writes docs/assets/{switch,sessions,install}-{light,dark}.svg. The colors match the
+Writes docs/assets/{switch,sessions,install,acts,token}-{light,dark}.svg. The colors match the
 app's account palette: indigo for the first account, teal for the second.
 """
 
@@ -47,7 +47,10 @@ def svg(width, height, body, title):
             '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
             'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{line}"/></marker>'
             '<marker id="warnarrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
-            'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{warn}"/></marker></defs>'
+            'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{warn}"/></marker>'
+            + ''.join(f'<marker id="{name}arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
+                      f'markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" '
+                      f'fill="{{{name}}}"/></marker>' for name in ('rose', 'personal')) + '</defs>'
             f'<rect width="{width}" height="{height}" rx="16" fill="{{canvas}}"/>{body}</svg>')
 
 
@@ -247,9 +250,137 @@ def install_diagram():
     return 900, 330, "".join(parts), "What the install prompt does: six steps, the network it uses, and what it never touches"
 
 
+# ---------------------------------------------------------------- upstream vs fork
+
+PANELS = [(40, "Upstream", "rose"), (460, "This fork", "personal")]
+PANEL_W = 400
+
+# How each kind of element looks: (fill, stroke, text, weight, dashed).
+STYLES = {
+    "auto": ("rosefill", "rose", "ink", 500, False),      # acts without you, or leaks
+    "plain": ("card", "line", "ink", 500, False),          # same in both
+    "kept": ("personalfill", "personal", "ink", 600, False),  # what the fork keeps
+    "gone": ("canvas", "line", "muted", 400, True),        # removed in the fork
+}
+ARROW = {"auto": ("rose", "url(#rosearrow)"), "plain": ("line", "url(#arrow)"),
+         "kept": ("personal", "url(#personalarrow)")}
+
+
+def frame(height):
+    out = []
+    for px, title, color in PANELS:
+        out.append(f'<rect x="{px}" y="24" width="{PANEL_W}" height="{height - 48}" rx="14" fill="{{card}}" '
+                   f'stroke="{{edge}}"/>')
+        out.append(f'<circle cx="{px + 26}" cy="52" r="5" fill="{{{color}}}"/>')
+        out.append(text(px + 40, 57, title, 15, "ink", 600))
+        out.append(f'<line x1="{px + 20}" y1="76" x2="{px + PANEL_W - 20}" y2="76" stroke="{{edge}}"/>')
+    return "".join(out)
+
+
+def box(x, y, w, h, label, kind, size=12.5, mono=False, radius=8):
+    fill, stroke, ink, weight, dashed = STYLES[kind]
+    dash = ' stroke-dasharray="4 3"' if dashed else ""
+    out = (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{radius}" fill="{{{fill}}}" stroke="{{{stroke}}}"'
+           f'{dash}/>' + text(x + w / 2, y + h / 2 + 4.3, label, size, ink, weight, "middle", mono))
+    if kind == "gone":
+        half = len(label) * size * 0.27
+        out += (f'<line x1="{x + w / 2 - half:.1f}" y1="{y + h / 2:.1f}" x2="{x + w / 2 + half:.1f}" '
+                f'y2="{y + h / 2:.1f}" stroke="{{muted}}" stroke-width="1"/>')
+    return out
+
+
+def arrow(d, kind, width=1.5):
+    color, marker = ARROW[kind]
+    return f'<path d="{d}" fill="none" stroke="{{{color}}}" stroke-width="{width}" marker-end="{marker}"/>'
+
+
+def note(x, y, ok, words):
+    mark, color = ("✓", "personal") if ok else ("✕", "rose")
+    return text(x, y, mark, 13, color, 700) + text(x + 18, y, words, 12.5, "ink")
+
+
+def acts_diagram():
+    """What can make the app act: triggers on the left, network on the right."""
+    triggers = ["Timer", "Wake from sleep", "Low usage", "Your click"]
+    network = ["Analytics", "Update check", "Token refresh", "Usage, profile"]
+    kinds = {
+        "Upstream": (["auto", "auto", "auto", "plain"], ["auto", "auto", "auto", "plain"]),
+        "This fork": (["gone", "gone", "gone", "kept"], ["gone", "gone", "gone", "kept"]),
+    }
+    height = 330
+    parts = [frame(height)]
+    rows = [114, 156, 198, 240]
+    for px, title, _ in PANELS:
+        tk, nk = kinds[title]
+        left_x, left_w = px + 16, 112
+        app_x, app_w, app_y, app_h = px + 158, 84, 168, 60
+        right_x, right_w = px + 272, 112
+        mid = app_y + app_h / 2
+        parts.append(text(left_x, 102, "Starts a switch", 12, "muted", 500))
+        parts.append(text(right_x, 102, "Talks to", 12, "muted", 500))
+        for label, kind, y in zip(triggers, tk, rows):
+            parts.append(box(left_x, y, left_w, 30, label, kind, 12))
+            if kind != "gone":
+                ey = mid + (y + 15 - mid) * 0.35
+                parts.append(arrow(f"M {left_x + left_w + 2} {y + 15} C {left_x + left_w + 20} {y + 15}, "
+                                   f"{app_x - 18} {ey:.1f}, {app_x - 3} {ey:.1f}", kind))
+        for label, kind, y in zip(network, nk, rows):
+            parts.append(box(right_x, y, right_w, 30, label, kind, 12))
+            if kind != "gone":
+                sy = mid + (y + 15 - mid) * 0.35
+                parts.append(arrow(f"M {app_x + app_w + 1} {sy:.1f} C {app_x + app_w + 18} {sy:.1f}, "
+                                   f"{right_x - 20} {y + 15}, {right_x - 3} {y + 15}", kind))
+        parts.append(f'<rect x="{app_x}" y="{app_y}" width="{app_w}" height="{app_h}" rx="12" fill="{{canvas}}" '
+                     f'stroke="{{ink}}" stroke-opacity="0.35"/>')
+        parts.append(text(app_x + app_w / 2, mid + 4.5, "CCSwitcher", 12.5, "ink", 600, "middle"))
+    return 900, height, "".join(parts), ("What can make the app act. Upstream: a timer, waking from sleep, low usage or "
+                                         "your click switch accounts, and it calls analytics, an update check and the "
+                                         "token endpoint. This fork: only your click, and only the usage and profile "
+                                         "requests.")
+
+
+def token_diagram():
+    """What happens to your token: writing it, and deciding whose it is."""
+    parts = [frame(420)]
+    for px, title, _ in PANELS:
+        fork = title == "This fork"
+        good = "kept" if fork else "auto"
+
+        # Writing the token.
+        parts.append(text(px + 20, 102, "Writing the token", 12, "muted", 500))
+        parts.append(box(px + 20, 116, 110, 40, "CCSwitcher", "plain", 13))
+        parts.append(box(px + 270, 116, 110, 40, "Keychain", "plain", 13))
+        parts.append(arrow(f"M {px + 132} 136 L {px + 266} 136", good, 1.8))
+        label = "SecItemUpdate" if fork else "security -w ‹token›"
+        parts.append(text(px + 200, 128, label, 11.5, "personal" if fork else "rose", 500, "middle", mono=True))
+        parts.append(note(px + 20, 186, fork, "The token stays in the app’s memory." if fork
+                          else "The token shows up in ps while it runs."))
+
+        # Deciding whose token it is.
+        parts.append(text(px + 20, 232, "Saving a login as Team", 12, "muted", 500))
+        if fork:
+            parts.append(box(px + 20, 246, 150, 30, "Refresh token matches", "kept", 12))
+            parts.append(text(px + 95, 292, "or", 11.5, "muted", 400, "middle"))
+            parts.append(box(px + 20, 300, 150, 30, "Anthropic’s profile", "kept", 12))
+            parts.append(arrow(f"M {px + 172} 261 C {px + 205} 261, {px + 220} 288, {px + 246} 288", "kept"))
+            parts.append(arrow(f"M {px + 172} 315 C {px + 205} 315, {px + 220} 288, {px + 246} 288", "kept"))
+        else:
+            parts.append(box(px + 20, 268, 150, 40, "~/.claude.json", "auto", 12.5, mono=True))
+            parts.append(arrow(f"M {px + 172} 288 L {px + 246} 288", "auto"))
+            parts.append(text(px + 209, 280, "trusted", 11, "rose", 500, "middle"))
+        parts.append(f'<rect x="{px + 250}" y="268" width="134" height="40" rx="8" fill="{{card}}" stroke="{{line}}"/>')
+        parts.append(badge(px + 270, 288, "T", "team"))
+        parts.append(text(px + 286, 292.5, "Saved as Team", 12, "ink", 500))
+        parts.append(note(px + 20, 364, fork, "Owner proven before saving." if fork
+                          else "Running sessions rewrite this file."))
+    return 900, 420, "".join(parts), ("What happens to your token. Upstream passes it to security on the command line "
+                                      "and trusts ~/.claude.json for its owner. This fork writes it in-process and "
+                                      "proves the owner first.")
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, build in [("switch", switch_diagram), ("sessions", sessions_diagram), ("install", install_diagram)]:
+    for name, build in [("switch", switch_diagram), ("sessions", sessions_diagram), ("install", install_diagram), ("acts", acts_diagram), ("token", token_diagram)]:
         width, height, body, title = build()
         for theme, colors in THEMES.items():
             path = OUT / f"{name}-{theme}.svg"

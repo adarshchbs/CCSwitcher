@@ -48,112 +48,21 @@ Restart Claude Code (or T3 Code) after a switch, so every session picks up the n
 
 ## How this fork differs from upstream
 
-This is a fork of [XueshiQiao/CCSwitcher](https://github.com/XueshiQiao/CCSwitcher), cut down after a security audit. Each diagram shows upstream's behavior on the left and this fork's on the right.
+This is a fork of [XueshiQiao/CCSwitcher](https://github.com/XueshiQiao/CCSwitcher), cut down after a security audit. Dashed boxes are what the fork removed.
 
-**1. Accounts change only when you click.**
+**What can make the app act**
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
-flowchart LR
-  subgraph Upstream
-    direction TB
-    u1["Usage nears a limit"] --> u2["Account switches on its own<br/>auto-switch engine, timers, wake handler"]
-  end
-  subgraph Fork
-    direction TB
-    f1["Usage nears a limit"] --> f2["The panel shows the numbers<br/>a switch waits for your click"]
-  end
-  Upstream ~~~ Fork
-  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
-  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
-  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
-  class u2 broke
-  class f2 fixed
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/acts-dark.svg">
+  <img src="docs/assets/acts-light.svg" width="100%" alt="Upstream: a timer, waking from sleep, low usage or your click can switch accounts, and the app calls analytics, an update check and the OAuth token endpoint. This fork: only your click switches, and the app only requests usage and profile.">
+</picture>
 
-**2. Tokens stay off the command line.**
+**What happens to your token**
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
-flowchart LR
-  subgraph Upstream
-    direction TB
-    u1["A switch writes the token"] --> u2["Token visible to any process<br/>passed as an argument to security -w"]
-  end
-  subgraph Fork
-    direction TB
-    f1["A switch writes the token"] --> f2["Token stays in the app's memory<br/>written in-process with SecItemUpdate"]
-  end
-  Upstream ~~~ Fork
-  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
-  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
-  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
-  class u2 broke
-  class f2 fixed
-```
-
-**3. Only Claude Code refreshes its tokens.**
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
-flowchart LR
-  subgraph Upstream
-    direction TB
-    u1["A token nears expiry"] --> u2["The app refreshes it itself<br/>rotating the refresh token Claude Code holds"]
-  end
-  subgraph Fork
-    direction TB
-    f1["A token nears expiry"] --> f2["Claude Code refreshes it<br/>the app never calls the token endpoint"]
-  end
-  Upstream ~~~ Fork
-  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
-  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
-  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
-  class u2 broke
-  class f2 fixed
-```
-
-**4. A saved login is proven to belong to its organization.**
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
-flowchart LR
-  subgraph Upstream
-    direction TB
-    u1["Save the live login"] --> u2["Owner read from ~/.claude.json<br/>running sessions rewrite that file"]
-  end
-  subgraph Fork
-    direction TB
-    f1["Save the live login"] --> f2["Owner proven first<br/>matching refresh token, or Anthropic's profile answer"]
-  end
-  Upstream ~~~ Fork
-  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
-  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
-  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
-  class u2 broke
-  class f2 fixed
-```
-
-**5. Nothing phones home.**
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
-flowchart LR
-  subgraph Upstream
-    direction TB
-    u1["The app runs"] --> u2["Analytics and update checks<br/>Aptabase and Sparkle"]
-  end
-  subgraph Fork
-    direction TB
-    f1["The app runs"] --> f2["Two Anthropic requests, on menu open<br/>usage and profile, nothing else"]
-  end
-  Upstream ~~~ Fork
-  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
-  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
-  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
-  class u2 broke
-  class f2 fixed
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/token-dark.svg">
+  <img src="docs/assets/token-light.svg" width="100%" alt="Upstream writes the token by passing it to security -w, where ps can see it, and trusts ~/.claude.json to say whose login it is. This fork writes it in-process with SecItemUpdate and proves the owner with a refresh-token match or Anthropic's profile before saving.">
+</picture>
 
 [docs/FORK_SPEC.md](docs/FORK_SPEC.md) has the full rules and the audit's reasoning.
 
