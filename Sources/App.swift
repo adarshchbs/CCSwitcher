@@ -8,7 +8,8 @@ struct CCSwitcherApp: App {
         MenuBarExtra {
             MenuContent(model: model)
         } label: {
-            Text(model.iconText)
+            Image(systemName: model.iconSymbol)
+                .accessibilityLabel(model.iconAccessibilityLabel)
         }
         .menuBarExtraStyle(.menu)
 

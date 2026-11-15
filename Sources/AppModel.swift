@@ -52,11 +52,30 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The menu bar shows the active account's initial, or `?`.
-    var iconText: String {
-        guard let active = accounts.first(where: { $0.id == activeId }),
-              let initial = active.label.first else { return "?" }
-        return String(initial).uppercased()
+    /// The menu bar icon, an SF Symbol rendered as a template image so it
+    /// matches the other menu bar icons:
+    /// - an unfinished switch or a live login that doesn't match
+    ///   `~/.claude.json`: a person with an exclamation mark
+    /// - the active account: its initial in a filled circle (Ⓚ, Ⓟ), or a
+    ///   filled person when the label doesn't start with a letter A–Z
+    /// - no saved login active: a person with a question mark
+    var iconSymbol: String {
+        if unfinished != nil || liveMismatch { return "person.crop.circle.badge.exclamationmark" }
+        guard let active = accounts.first(where: { $0.id == activeId }) else {
+            return "person.crop.circle.badge.questionmark"
+        }
+        guard let initial = active.label.lowercased().first, ("a"..."z").contains(initial) else {
+            return "person.crop.circle.fill"
+        }
+        return "\(initial).circle.fill"
+    }
+
+    /// What VoiceOver reads for the menu bar icon.
+    var iconAccessibilityLabel: String {
+        if unfinished != nil { return "Claude account: unfinished switch" }
+        if liveMismatch { return "Claude account: login mismatch" }
+        guard let active = accounts.first(where: { $0.id == activeId }) else { return "Claude account: none saved" }
+        return "Claude account: \(active.label)"
     }
 
     func title(for account: SavedAccount) -> String {
