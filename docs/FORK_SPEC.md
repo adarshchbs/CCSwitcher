@@ -19,8 +19,8 @@ below cites the audit finding behind it.
 ## Hard rules
 
 1. **No secret ever goes in argv or the environment.** Write the Claude Code
-   Keychain item with `/usr/bin/security -i` and send the command on stdin,
-   with the password hex-encoded using `-X`. Reading with
+   Keychain item in-process with `SecItemUpdate` (see Deviation 1; the
+   original `security -i` plan can't carry a real-sized envelope). Reading with
    `security find-generic-password -w` is fine, since the secret comes back on stdout.
 2. **Nothing changes credentials without a click.** No timers, wake
    handlers, launch-time capture, auto-switch, background refresh, URL
@@ -289,27 +289,32 @@ Add a short "About this fork" section at the top:
 
 Places where the implementation differs from the text above, and why.
 
-1. **`security -i` can't take a 16 KB payload.** `security -i` reads its
-   input in 4096-byte chunks. A longer line gets split, and each piece runs as
-   its own command. The first piece is a valid `add-generic-password` with a
-   truncated `-X` value and no keychain argument, so it writes a corrupt
-   password to the default keychain. (Seen while probing: a cut-off test
-   command wrote a junk item to the login keychain.) Changes:
-   - `ClaudeItem` refuses any command line over 4000 bytes (`maxCommandBytes`)
-     before it starts `security`. With the real service name and a short
-     account name, that allows an envelope of about 1,960 bytes of JSON.
-   - Before writing anything, `Switcher` checks that both the new envelope
-     and the rollback envelope fit. If either doesn't, the switch aborts with
-     `tooLargeToWrite` and nothing has changed.
-   - The 16 KB round-trip test became two tests. One round-trips the largest
-     payload that fits, with quotes, spaces and unicode. The other checks that
-     a 16 KB payload is refused without starting `security`.
-   - **Open decision:** if Claude Code's real envelope (with `mcpOAuth`
-     entries) is larger than about 1.9 KB, every switch will be refused. The
-     alternative that keeps secrets out of argv is writing the item
-     in-process with `SecItemUpdate`. That changes which process the item's
-     ACL sees, and it brings Keychain prompts that may need the login
-     password. It needs the owner's call, so it isn't implemented.
+1. **Writes use `SecItemUpdate`, not `security -i`.** This supersedes Hard
+   rule 1's write method and the "Claude Code's Keychain item → Write" section.
+   - Why: `security -i` reads its input in 4096-byte chunks. A longer line gets
+     split, and each piece runs as its own command. The first piece is a valid
+     `add-generic-password` with a truncated `-X` value and no keychain
+     argument, so it writes a corrupt password to the default keychain. (Seen
+     while probing: a cut-off test command wrote a junk item to the login
+     keychain. That item has since been deleted.) The owner's real envelope is
+     2,932 bytes of JSON (`mcpOAuth` is 2,361 of them), about 5.9 KB as hex,
+     so `security -i` could never write it.
+   - Now: `ClaudeItem.write` calls `SecItemUpdate` on the existing item and
+     changes only `kSecValueData`. It throws `.notFound` rather than creating an
+     item, and nothing deletes one. Reads still go through
+     `security find-generic-password -w`, which the item already trusts, so
+     reads never prompt. No secret goes in argv or the environment, so Hard
+     rule 1 still holds.
+   - Cost: the first switch shows a Keychain dialog asking to let CCSwitcher
+     change the item. Ad hoc signing means it can come back after a rebuild.
+   - Tests: `testUpdateLeavesAccessListUnchanged` checks that an update leaves
+     the item's access list and partition IDs exactly as they were.
+     `testRoundTrips16KBPayloadWithQuotesSpacesAndUnicode` restores the
+     spec's 16 KB case. A static check bans `security -i`, `-X`,
+     `add-generic-password`, `SecItemAdd` and `SecItemDelete` in
+     `ClaudeItem.swift`. Test items are seeded through `security` with `-A`
+     and an `apple-tool:,apple:,unsigned:` partition list on the temp
+     keychain only, so the suite never shows a dialog.
 2. **`find-generic-password -w` prints hex for non-ASCII data.** When the
    password isn't printable ASCII, `security` prints it as hex. `ClaudeItem`
    decodes the output as hex when it doesn't start with `{`.

@@ -7,15 +7,36 @@ import XCTest
 final class TempKeychain {
     let directory: URL
     let path: String
+    private let password: String
 
     init() throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ccswitcher-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         path = directory.appendingPathComponent("test.keychain-db").path
-        let password = UUID().uuidString
+        password = UUID().uuidString
         try Self.security(["create-keychain", "-p", password, path])
         try Self.security(["unlock-keychain", "-p", password, path])
+    }
+
+    /// Creates a generic password the way Claude Code does, through
+    /// `/usr/bin/security`, then opens it to both `security` and the test
+    /// process. Without that, the first cross-tool access shows a Keychain
+    /// password dialog and the test hangs until it times out. Test data only:
+    /// `value` goes in argv here, which the app itself never does.
+    func seedGenericPassword(service: String, account: String, value: String) throws {
+        try Self.security(["add-generic-password", "-A", "-s", service, "-a", account, "-w", value, path])
+        // `security` is `apple-tool:`, the Apple-signed xctest host is `apple:`.
+        try Self.security(["set-generic-password-partition-list", "-S", "apple-tool:,apple:,unsigned:",
+                           "-s", service, "-a", account, "-k", password, path], quiet: true)
+    }
+
+    /// The keychain's items with their access lists and partition IDs, minus
+    /// modification times. No secrets: `dump-keychain` without `-d`.
+    func accessControlDump() throws -> String {
+        let result = try SecurityTool().run(["dump-keychain", "-a", path], stdin: nil)
+        return String(decoding: result.stdout, as: UTF8.self)
+            .split(separator: "\n").filter { !$0.contains("\"mdat\"") }.joined(separator: "\n")
     }
 
     /// The keychain as a `SecKeychain`, for the `SecItem` APIs.
@@ -33,10 +54,12 @@ final class TempKeychain {
         try FileManager.default.removeItem(at: directory)
     }
 
-    private static func security(_ arguments: [String]) throws {
+    private static func security(_ arguments: [String], quiet: Bool = false) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = arguments
+        // set-*-partition-list prints the item's attributes on success.
+        if quiet { process.standardOutput = FileHandle.nullDevice }
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
@@ -46,9 +69,9 @@ final class TempKeychain {
     }
 }
 
-/// Wraps the real `security` runner. Records every spawn, and refuses any
-/// `security -i` command that isn't aimed at the temp keychain or that is long
-/// enough for `security` to split. Either would write to the login keychain.
+/// Wraps the real `security` runner. Records every spawn, and refuses anything
+/// that isn't a read aimed at the temp keychain. `ClaudeItem` only reads
+/// through `security`; a spawn with stdin means a write path crept back in.
 final class GuardedRunner: SecurityRunning, @unchecked Sendable {
     private let keychainPath: String
     private let lock = NSLock()
@@ -62,13 +85,9 @@ final class GuardedRunner: SecurityRunning, @unchecked Sendable {
 
     func run(_ arguments: [String], stdin: Data?) throws -> SecurityResult {
         lock.withLock { _calls.append((arguments, stdin)) }
-        if let stdin {
-            let line = String(decoding: stdin, as: UTF8.self)
-            precondition(stdin.count < 4096, "security -i would split this line")
-            precondition(line.hasSuffix(" \"\(keychainPath)\"\n"), "write not aimed at the temp keychain")
-        } else {
-            precondition(arguments.last == keychainPath, "read not aimed at the temp keychain")
-        }
-        return try SecurityTool().run(arguments, stdin: stdin)
+        precondition(stdin == nil, "ClaudeItem must not write through security")
+        precondition(arguments.first == "find-generic-password", "only reads go through security")
+        precondition(arguments.last == keychainPath, "read not aimed at the temp keychain")
+        return try SecurityTool().run(arguments, stdin: nil)
     }
 }

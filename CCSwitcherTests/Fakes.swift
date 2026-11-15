@@ -14,7 +14,6 @@ final class FakeItem: ClaudeItemAccess, @unchecked Sendable {
     var failWrite: ((Int) -> Error?)?
     /// Whether a write stores its data (false simulates a silent no-op).
     var writeTakesEffect: ((Int) -> Bool)?
-    var maxBytes = Int.max
 
     init(_ data: Data?) { self.data = data }
 
@@ -34,8 +33,6 @@ final class FakeItem: ClaudeItemAccess, @unchecked Sendable {
             if writeTakesEffect?(writes.count) ?? true { data = newData }
         }
     }
-
-    func canWrite(_ data: Data) -> Bool { data.count <= maxBytes }
 }
 
 final class FakeStore: SavedLoginStore, @unchecked Sendable {

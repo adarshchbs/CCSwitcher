@@ -15,10 +15,13 @@ from them. Compared with upstream:
 - **Nothing changes credentials without a click.** No timers, wake handlers,
   auto-switch, background token refresh, URL scheme, widget or launch-time
   capture.
-- **No secret on a command line.** The app writes Claude Code's Keychain item
-  through `security -i`, with the hex-encoded secret on stdin. It refuses
-  envelopes too long for one `security -i` line (about 1.9 KB of JSON) rather
-  than put them in argv.
+- **No secret on a command line.** The app reads Claude Code's Keychain item
+  with `security find-generic-password -w` (the secret comes back on stdout)
+  and writes it in-process with `SecItemUpdate`. It never creates or deletes
+  the item. The first switch asks you to let CCSwitcher change the item.
+  Because the build is signed ad hoc, macOS may ask again after each rebuild.
+  Approving adds CCSwitcher to the item's access list and leaves Claude Code's
+  access in place.
 - **The app never calls the OAuth token endpoint.** Claude Code refreshes its
   own tokens.
 - **One network request:** `GET https://api.anthropic.com/api/oauth/usage`. No

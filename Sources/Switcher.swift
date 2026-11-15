@@ -12,7 +12,6 @@ enum SwitchError: Error, Equatable {
     case storedLoginInvalid(String)
     case backupFailed(String)
     case liveLoginKeptChanging
-    case tooLargeToWrite(bytes: Int)
     case loginChangedDuringSave
     case rolledBack(String)
     case rollbackFailed(String)
@@ -30,7 +29,6 @@ enum SwitchError: Error, Equatable {
         case .storedLoginInvalid(let why): "The saved login for this account is unusable: \(why)"
         case .backupFailed(let why): "Couldn't back up the current login, so nothing was changed: \(why)"
         case .liveLoginKeptChanging: "Claude Code kept updating its login during the switch. Nothing was changed. Try again."
-        case .tooLargeToWrite(let bytes): "Claude's Keychain item would be \(bytes) bytes, too large to write without putting the secret on a command line. Nothing was changed."
         case .loginChangedDuringSave: "The Claude login changed while you were naming it. Nothing was saved."
         case .rolledBack(let why): "The switch failed and the previous login was restored: \(why)"
         case .rollbackFailed(let why): "The switch failed and the previous login couldn't be restored (\(why)). Run `claude /login` in a terminal and pick the organization you want."
@@ -206,11 +204,6 @@ actor Switcher {
             let next: Envelope
             do { next = try current.replacing("claudeAiOauth", with: targetLogin.claudeAiOauth) }
             catch { throw SwitchError.storedLoginInvalid(describe(error)) }
-            // Both the switch and a rollback must be writable before starting.
-            for envelope in [next, current] where !item.canWrite(envelope.bytes) {
-                throw SwitchError.tooLargeToWrite(bytes: envelope.bytes.count)
-            }
-
             do {
                 try item.write(next.bytes)                     // 5.
                 try config.writeProfile(targetLogin.profile)   // 6.

@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Security
 
 private let log = Logger(subsystem: "com.adarshchbs.ccswitcher", category: "ClaudeItem")
 
@@ -7,8 +8,6 @@ private let log = Logger(subsystem: "com.adarshchbs.ccswitcher", category: "Clau
 protocol ClaudeItemAccess: Sendable {
     func read() throws -> Data
     func write(_ data: Data) throws
-    /// Whether `write` can send `data` at all (see `ClaudeItem.maxCommandBytes`).
-    func canWrite(_ data: Data) -> Bool
 }
 
 /// Runs `/usr/bin/security`. A protocol so tests can record what gets spawned.
@@ -23,47 +22,50 @@ struct SecurityResult: Sendable {
 }
 
 /// Claude Code's Keychain item: service `Claude Code-credentials`, account
-/// `NSUserName()`, in the default keychain.
+/// `NSUserName()`, in the file-based login keychain.
 ///
 /// No secret ever goes in argv or the environment:
-/// - read: `security find-generic-password -s … -a … -w`; the secret comes
-///   back on stdout.
-/// - write: `security -i`, with `add-generic-password -U … -X <hex>` sent on
-///   stdin.
-/// The item is never deleted.
-struct ClaudeItem: ClaudeItemAccess {
+/// - read: `security find-generic-password -s … -a … -w`. The secret comes
+///   back on stdout. Going through `/usr/bin/security`, which the item already
+///   trusts, means reads never trigger a Keychain prompt.
+/// - write: `SecItemUpdate` on the existing item, data only. The first write
+///   asks the user to let this app change the item; approving adds the app to
+///   the item's access list and leaves every existing entry in place.
+///
+/// The item is never created or deleted. Claude Code owns its lifecycle.
+///
+/// `@unchecked Sendable`: every property is immutable after init, and the
+/// Keychain APIs that use `keychain` are thread-safe.
+struct ClaudeItem: ClaudeItemAccess, @unchecked Sendable {
     enum Failure: Error, Equatable {
-        case invalidName(String)
         case notFound
-        /// The `security -i` command line would be longer than it can read.
-        case tooLarge(bytes: Int)
         case securityFailed(status: Int32)
+        case updateFailed(status: OSStatus)
         case unreadableOutput
     }
 
     static let claudeService = "Claude Code-credentials"
 
-    /// `security -i` reads its input in 4096-byte chunks and runs whatever
-    /// doesn't fit as a separate command. A cut-off `add-generic-password`
-    /// line still runs: it drops the trailing keychain argument and writes a
-    /// truncated password to the default keychain. Lines are capped well under
-    /// that limit, and anything longer is refused before `security` starts.
-    static let maxCommandBytes = 4000
-
     let service: String
     let account: String
-    /// Tests aim the item at a temporary keychain. Production passes nil, so
-    /// `security` uses the default keychain, as Claude Code does.
+    /// Tests aim the item at a temporary keychain, given both as a path (for
+    /// `security`) and as a `SecKeychain` (for `SecItemUpdate`). Production
+    /// passes nil for both and uses the default keychain, as Claude Code does.
     let keychainPath: String?
+    let keychain: SecKeychain?
     let runner: SecurityRunning
 
     init(service: String = claudeService,
          account: String = NSUserName(),
          keychainPath: String? = nil,
+         keychain: SecKeychain? = nil,
          runner: SecurityRunning = SecurityTool()) {
+        precondition((keychainPath == nil) == (keychain == nil),
+                     "keychainPath and keychain must name the same keychain")
         self.service = service
         self.account = account
         self.keychainPath = keychainPath
+        self.keychain = keychain
         self.runner = runner
     }
 
@@ -79,42 +81,27 @@ struct ClaudeItem: ClaudeItemAccess {
         return try Self.decodePassword(result.stdout)
     }
 
+    /// Replaces the item's data in place. Throws `.notFound` rather than
+    /// creating an item if Claude Code's item is missing.
     func write(_ data: Data) throws {
-        let line = try command(for: data)
-        let result = try runner.run(["-i"], stdin: Data((line + "\n").utf8))
-        // Never log stderr here: an error message from `security` may echo
-        // the command line, which holds the hex-encoded secret.
-        guard result.status == 0, result.stderr.isEmpty else {
-            log.error("security -i exited with \(result.status, privacy: .public), stderr \(result.stderr.count, privacy: .public) bytes")
-            throw Failure.securityFailed(status: result.status)
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecUseDataProtectionKeychain as String: false,
+        ]
+        if let keychain { query[kSecMatchSearchList as String] = [keychain] }
+        let update = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        switch status {
+        case errSecSuccess: return
+        case errSecItemNotFound: throw Failure.notFound
+        default:
+            // errSecUserCanceled / errSecAuthFailed land here when the user
+            // declines the Keychain prompt. Nothing was written.
+            log.error("SecItemUpdate failed with \(status, privacy: .public)")
+            throw Failure.updateFailed(status: status)
         }
-    }
-
-    func canWrite(_ data: Data) -> Bool {
-        (try? command(for: data)) != nil
-    }
-
-    /// The single `security -i` command that writes `data`.
-    private func command(for data: Data) throws -> String {
-        guard Self.isSafe(service, allowing: " ") else { throw Failure.invalidName(service) }
-        guard Self.isSafe(account) else { throw Failure.invalidName(account) }
-        var line = "add-generic-password -U -s \"\(service)\" -a \"\(account)\" -X \(data.hexString)"
-        if let keychainPath {
-            guard keychainPath.hasPrefix("/"), Self.isSafe(keychainPath, allowing: "/") else {
-                throw Failure.invalidName(keychainPath)
-            }
-            line += " \"\(keychainPath)\""
-        }
-        guard line.utf8.count + 1 <= Self.maxCommandBytes else {
-            throw Failure.tooLarge(bytes: line.utf8.count + 1)
-        }
-        return line
-    }
-
-    /// `^[A-Za-z0-9._-]+$`, plus the characters in `extra`.
-    private static func isSafe(_ value: String, allowing extra: String = "") -> Bool {
-        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" + extra)
-        return !value.isEmpty && value.allSatisfy { allowed.contains($0) }
     }
 
     /// `security … -w` prints the password followed by a newline. When the

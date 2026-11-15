@@ -47,14 +47,14 @@ final class StaticChecksTests: XCTestCase {
         let start = try XCTUnwrap(content.range(of: "    func write(_ data: Data) throws {"))
         let end = try XCTUnwrap(content.range(of: "\n    }\n", range: start.upperBound..<content.endIndex))
         let write = String(content[start.lowerBound..<end.upperBound])
+        // Writes go through SecItemUpdate, never through a `security` process.
+        XCTAssertTrue(write.contains("SecItemUpdate("))
+        XCTAssertFalse(write.contains("runner"))
         XCTAssertFalse(write.contains(#""-w""#))
-        XCTAssertTrue(write.contains(#"["-i"]"#))
-
-        // The command line is built in one place, with -X and no -w.
-        let command = try XCTUnwrap(content.components(separatedBy: "\n").first { $0.contains("add-generic-password") && $0.contains("var line") })
-        XCTAssertTrue(command.contains(" -X "))
-        XCTAssertFalse(command.contains("-w"))
-        XCTAssertFalse(content.contains("delete-generic-password"))
+        // The item is never created or deleted, and no other write path exists.
+        for banned in ["add-generic-password", "delete-generic-password", "SecItemAdd", "SecItemDelete", #""-i""#, #""-X""#] {
+            XCTAssertFalse(content.contains(banned), banned)
+        }
         // "-w" appears only once: in the read.
         XCTAssertEqual(content.components(separatedBy: #""-w""#).count - 1, 1)
     }

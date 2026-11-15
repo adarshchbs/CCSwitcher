@@ -154,15 +154,6 @@ final class SwitcherTests: XCTestCase {
         XCTAssertTrue(item.writes.isEmpty)
     }
 
-    func testEnvelopeTooLargeToWriteAborts() async throws {
-        item.maxBytes = 10
-        await assertThrowsCase({ if case .tooLargeToWrite = $0 { true } else { false } }) {
-            try await self.switchToPersonal()
-        }
-        XCTAssertTrue(item.writes.isEmpty)
-        XCTAssertEqual(config.writes, 0)
-    }
-
     // MARK: - Rollback
 
     func testItemWriteFailureRollsBack() async throws {
