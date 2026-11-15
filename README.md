@@ -1,156 +1,175 @@
-# CCSwitcher, manual-only hardened fork
+<p align="center">
+  <img src="assets/CCSwitcher-icon.png" width="88" alt="">
+</p>
 
-## About this fork
+<h1 align="center">CCSwitcher</h1>
 
-A macOS menu bar app that switches Claude Code between saved logins, and only
-when you click. It was built for one person with two logins under one email
-address (a company Team org and a personal org). It tells them apart by
-organization UUID, never by email.
+<p align="center">
+  Switch Claude Code between your Team and Personal logins from the menu bar.<br>
+  Only when you click.
+</p>
 
-This is a fork of [XueshiQiao/CCSwitcher](https://github.com/XueshiQiao/CCSwitcher),
-cut down after a security audit of upstream. [docs/FORK_SPEC.md](docs/FORK_SPEC.md)
-has the full rules, and its Deviations section lists where this build differs
-from them. Compared with upstream:
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/ui-dark.png">
+    <img src="docs/assets/ui-light.png" width="392" alt="The CCSwitcher panel: Team and Personal accounts, each with Session and Weekly usage bars showing how much is left. Personal is active and tagged new sessions.">
+  </picture>
+</p>
 
-- **Nothing changes credentials without a click.** No timers, wake handlers,
-  auto-switch, background token refresh, URL scheme, widget or launch-time
-  capture.
-- **No secret on a command line.** The app reads Claude Code's Keychain item
-  with `security find-generic-password -w` (the secret comes back on stdout)
-  or, during a switch, in-process with `SecItemCopyMatching`, and writes it
-  in-process with `SecItemUpdate`. It never creates or deletes the item. The
-  first switch asks you to let CCSwitcher read the item; that dialog comes
-  before anything changes. Because the build is signed ad hoc, macOS may ask
-  again after each rebuild.
-- **The app never calls the OAuth token endpoint.** Claude Code refreshes its
-  own tokens.
-- **Two network requests:** `GET https://api.anthropic.com/api/oauth/usage`
-  and `GET https://api.anthropic.com/api/oauth/profile`, through one ephemeral
-  session with no cache that refuses redirects. No analytics, updater,
-  pricing fetch or version check.
-- **It proves whose login it's saving.** Both logins share one email, so
-  before saving or backing up a login the app checks which organization it
-  belongs to: either the refresh token matches the one already saved for
-  that organization, or the profile endpoint says so for the (unexpired)
-  access token. Only the access token is sent. If neither works (an expired
-  token, no network), it changes nothing and tells you to use Claude Code once
-  so it refreshes. The menu also warns when the live login provably belongs to
-  a different organization than `~/.claude.json` names.
-- **A switch swaps only `claudeAiOauth`.** It keeps `mcpOAuth` and every other
-  key in Claude Code's item byte for byte. Before writing, it backs up the
-  current login (keeping the one it replaces, which Settings can restore) and
-  reads the backup back. Afterward it verifies the result and rolls back on
-  failure, unless Claude Code changed the item in the meantime.
-- **An interrupted switch is noticed.** If the app dies mid-switch, the next
-  launch blocks switching and asks whether to restore the previous login or
-  leave things as they are.
-- **No file logs.** Logging goes through `os.Logger`, with emails, org names
-  and UUIDs marked private.
-- **Add account runs Claude Code's own login.** After a confirmation, the app
-  backs up the current login and runs `claude auth login --claudeai` from a
-  fixed path (`~/.local/bin/claude`, `/opt/homebrew/bin/claude` or
-  `/usr/local/bin/claude`), with no shell and a minimal environment. It
-  never reads, logs or shows the CLI's output. It saves the new login only
-  after the profile endpoint confirms its organization.
-- Removed: Sparkle, Aptabase, GRDB, the cost/activity stats, the desktop
-  widget, upstream's in-app login flow (browser interceptor, URL handling,
-  shell-based CLI lookup), and the translations.
+<p align="center">
+  Each account keeps its own color. Bars show how much of each limit is left.<br>
+  The tagged account is the one new Claude sessions will use.
+</p>
 
-The original code is © 2026 XueshiQiao, under the MIT License (see
-[LICENSE](LICENSE)). This fork keeps the same license.
+## Install
 
-### Build
+Paste this into Claude Code or Codex on your Mac:
 
-```sh
-brew install xcodegen
-xcodegen generate
-xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher -configuration Release -derivedDataPath build build
-open build/Build/Products/Release   # CCSwitcher.app is here
+```text
+Install CCSwitcher on this Mac by following https://raw.githubusercontent.com/adarshchbs/CCSwitcher/manual-switch-hardened/docs/INSTALL.md
 ```
 
-Run the tests with:
+The agent builds the app from source, runs the tests and tells you how to save your first two logins.
 
-```sh
-xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher test
+## What one click does
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/switch-dark.svg">
+  <img src="docs/assets/switch-light.svg" width="100%" alt="Switching to Personal: 1. back up Team's login, 2. swap only claudeAiOauth in Claude Code's Keychain item, 3. write Personal into ~/.claude.json, 4. ask Anthropic who owns the token. Any failure puts the backup back.">
+</picture>
+
+## After a switch
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/sessions-dark.svg">
+  <img src="docs/assets/sessions-light.svg" width="100%" alt="Timeline: sessions started before the switch keep Team until restarted, and a token refresh in one can write Team back. Sessions started after the switch use Personal.">
+</picture>
+
+Restart Claude Code (or T3 Code) after a switch, so every session picks up the new login.
+
+## How this fork differs from upstream
+
+This is a fork of [XueshiQiao/CCSwitcher](https://github.com/XueshiQiao/CCSwitcher), cut down after a security audit. Each diagram shows upstream's behavior on the left and this fork's on the right.
+
+**1. Accounts change only when you click.**
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
+flowchart LR
+  subgraph Upstream
+    direction TB
+    u1["Usage nears a limit"] --> u2["Account switches on its own<br/>auto-switch engine, timers, wake handler"]
+  end
+  subgraph Fork
+    direction TB
+    f1["Usage nears a limit"] --> f2["The panel shows the numbers<br/>a switch waits for your click"]
+  end
+  Upstream ~~~ Fork
+  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
+  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
+  class u2 broke
+  class f2 fixed
 ```
 
-The tests never touch your login keychain or `~/.claude*`. They use a
-keychain created in a temp directory, plus temp files and fakes.
+**2. Tokens stay off the command line.**
 
-The build is signed ad hoc with hardened runtime on. It is **not sandboxed**,
-because it has to read and write `~/.claude.json` and Claude Code's Keychain
-item. It has no entitlements.
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
+flowchart LR
+  subgraph Upstream
+    direction TB
+    u1["A switch writes the token"] --> u2["Token visible to any process<br/>passed as an argument to security -w"]
+  end
+  subgraph Fork
+    direction TB
+    f1["A switch writes the token"] --> f2["Token stays in the app's memory<br/>written in-process with SecItemUpdate"]
+  end
+  Upstream ~~~ Fork
+  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
+  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
+  class u2 broke
+  class f2 fixed
+```
 
-The first switch shows a Keychain prompt. Since every build has a new ad hoc
-signature, macOS may ask again after each rebuild.
+**3. Only Claude Code refreshes its tokens.**
 
-## Known risks
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
+flowchart LR
+  subgraph Upstream
+    direction TB
+    u1["A token nears expiry"] --> u2["The app refreshes it itself<br/>rotating the refresh token Claude Code holds"]
+  end
+  subgraph Fork
+    direction TB
+    f1["A token nears expiry"] --> f2["Claude Code refreshes it<br/>the app never calls the token endpoint"]
+  end
+  Upstream ~~~ Fork
+  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
+  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
+  class u2 broke
+  class f2 fixed
+```
 
-These remain after the hardening, because Claude Code offers nothing to
-coordinate with (no lock, no API for switching accounts):
+**4. A saved login is proven to belong to its organization.**
 
-- **Token refresh race.** Claude Code can refresh and rotate its token at any
-  moment. The switch re-reads the Keychain item in-process and writes it right
-  after, with no process spawned in between, but a few milliseconds remain
-  between that read and the write. If Claude Code rotates the token in that
-  window, the switch overwrites the new token and the account you switched
-  away from needs `claude /login`. Rollback won't overwrite an item that
-  changed after the switch wrote it.
-- **`~/.claude.json` race.** The profile write re-checks the file's mtime,
-  size and inode right before renaming the new file over it, and retries up to
-  3 times. A write Claude Code makes between that last check and the rename
-  is still lost.
-- **Running sessions keep, and can restore, the old login.** Claude Code
-  2.1.x watches the Keychain item and sometimes adopts a new login on its
-  own, but not reliably. A session that refreshes its old token writes that
-  login back. Restart Claude Code (or T3 Code) after a switch.
-- **The ownership check trusts one Anthropic endpoint** when the token
-  doesn't match a saved login. If the profile endpoint is unreachable, the
-  app refuses to save or switch rather than guess.
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
+flowchart LR
+  subgraph Upstream
+    direction TB
+    u1["Save the live login"] --> u2["Owner read from ~/.claude.json<br/>running sessions rewrite that file"]
+  end
+  subgraph Fork
+    direction TB
+    f1["Save the live login"] --> f2["Owner proven first<br/>matching refresh token, or Anthropic's profile answer"]
+  end
+  Upstream ~~~ Fork
+  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
+  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
+  class u2 broke
+  class f2 fixed
+```
 
-## Using it
+**5. Nothing phones home.**
 
-1. In a terminal, run `claude /login` and pick the first organization. Then
-   choose **Save current login…** from the menu and name it.
-2. Choose **Add account…**. The app backs up the current login, then your
-   browser opens; pick the other organization there and name the new account
-   when the app asks. The menu shows "Waiting for sign-in in your browser…"
-   with **Cancel sign-in** until you finish (or 10 minutes pass). If you
-   cancel the naming step, the new login stays active but unsaved; **Save
-   current login…** saves it.
-3. Click an account in the menu to switch. If Claude Code sessions are
-   running, the app lists them first, because they may keep using the old
-   account until you restart them.
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 630}}}%%
+flowchart LR
+  subgraph Upstream
+    direction TB
+    u1["The app runs"] --> u2["Analytics and update checks<br/>Aptabase and Sparkle"]
+  end
+  subgraph Fork
+    direction TB
+    f1["The app runs"] --> f2["Two Anthropic requests, on menu open<br/>usage and profile, nothing else"]
+  end
+  Upstream ~~~ Fork
+  classDef broke fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
+  classDef fixed fill:#EAF3DE,stroke:#3B6D11,color:#27500A
+  classDef later fill:#FFFFFF,stroke:#888780,stroke-dasharray:5 5,color:#444441
+  class u2 broke
+  class f2 fixed
+```
 
-The menu bar shows the first letter of the active account's name, or a
-question mark when the current login isn't one you saved. The checkmark goes
-to the account that owns the token in the Keychain, the one new Claude
-sessions will use, and that row says "new sessions".
+[docs/FORK_SPEC.md](docs/FORK_SPEC.md) has the full rules and the audit's reasoning.
 
-Under each account the menu shows the limits Anthropic reports: Session,
-Weekly, and a per-model weekly row such as "Weekly · Fable", each with a bar
-showing how much is left, as T3 Code does (7% used shows as 93%). Hover a row to see when it resets. Accounts on the Max 20x
-tier have no session limit, so their Session row is hidden. The app fetches
-usage once each time you open the menu, and again when you choose **Refresh
-usage**. It never polls. When a saved token has expired, the row shows the last
-values it read, dimmed with "as of HH:mm"; they update after you switch to that
-account.
+<details>
+<summary><b>Known risks</b></summary>
 
-**Settings…** renames and removes accounts. Removing an account deletes its
-saved login and leaves the current Claude login alone.
+Claude Code offers no lock or switching API, so these remain:
 
-### After a switch
+- **Token refresh race.** If Claude Code rotates its token in the milliseconds between the switch's read and write, the account you left needs `claude /login`.
+- **`~/.claude.json` race.** A write Claude Code makes between the app's last check and its rename is lost.
+- **Running sessions keep the old login** and can write it back when their token refreshes. The panel warns you; restart them.
+- **The ownership check trusts Anthropic's profile endpoint** when the token matches no saved login. If it's unreachable, the app refuses to save or switch.
 
-A switch changes the login for **new** Claude Code sessions only. Each
-session reads its login when it starts and keeps it in memory, so:
+</details>
 
-- Sessions that were already running keep using the old account until you
-  restart them. The menu counts them: "⚠︎ 3 Claude sessions started before
-  16:17 may still be using Team. Restart them to be sure they use Personal."
-- When an old session refreshes its token, it can write the old account
-  back to the Keychain and `~/.claude.json`. The menu then shows "Changed
-  outside CCSwitcher at HH:mm" or a `~/.claude.json` mismatch warning, with a
-  **Fix ~/.claude.json** item.
+---
 
-There is no supported way to move a running session to the new login.
-Restart them; in T3 Code, quit and reopen the app.
+<sub>The original code is © 2026 XueshiQiao under the MIT License (see [LICENSE](LICENSE)). This fork keeps the same license.</sub>

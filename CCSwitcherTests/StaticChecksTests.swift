@@ -30,7 +30,7 @@ final class StaticChecksTests: XCTestCase {
     func testNoEmployerName() throws {
         let needle = "ky" + "zen"
         let skip: Set<String> = [".git", "build", "CCSwitcher.xcodeproj", ".w"]
-        let textExtensions: Set<String> = ["swift", "md", "yml", "yaml", "json", "plist", "txt", "sh", ""]
+        let textExtensions: Set<String> = ["swift", "md", "yml", "yaml", "json", "plist", "txt", "sh", "svg", "py", ""]
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]))
         var checked = 0
         for case let url as URL in enumerator {
