@@ -189,7 +189,8 @@ final class ClaudeItemKeychainTests: XCTestCase {
         let journal = FakeJournal()
         let switcher = Switcher(item: searching, store: store, config: FakeConfig(Fixture.profile(org: "org-team")),
                                 accounts: FakeAccounts([Fixture.team, Fixture.personal]), sessions: FakeSessions(),
-                                lookup: FakeLookup(), clock: FixedClock(date: Fixture.now), journal: journal)
+                                lookup: FakeLookup(), clock: FixedClock(date: Fixture.now), journal: journal,
+                                cli: Fixture.noCLI, login: FakeLoginRunner())
         do {
             _ = try await switcher.switchTo(Fixture.personal.id) { _ in true }
             XCTFail("expected claudeItemNotUnique")

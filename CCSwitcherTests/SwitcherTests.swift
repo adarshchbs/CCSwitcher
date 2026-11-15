@@ -26,7 +26,8 @@ final class SwitcherTests: XCTestCase {
 
     private func makeSwitcher() -> Switcher {
         Switcher(item: item, store: store, config: config, accounts: accounts, sessions: sessions,
-                 lookup: lookup, clock: FixedClock(date: Fixture.now), journal: journal)
+                 lookup: lookup, clock: FixedClock(date: Fixture.now), journal: journal,
+                 cli: Fixture.noCLI, login: FakeLoginRunner())
     }
 
     private func switchToPersonal(confirm: @escaping @Sendable ([LiveSession]) async -> Bool = { _ in true }) async throws -> SwitchOutcome {
@@ -387,7 +388,7 @@ final class SwitcherTests: XCTestCase {
         XCTAssertTrue(item.writes.isEmpty)
 
         // "Restore Team" puts Team's backed-up login and profile back.
-        try await relaunched.restoreUnfinishedSwitch()
+        _ = try await relaunched.restoreUnfinishedSwitch { _ in nil }
         let live = try Envelope(XCTUnwrap(item.data))
         XCTAssertEqual(try live.claudeAiOauth(), Fixture.oauth("team-live"))
         XCTAssertEqual(live.member("mcpOAuth"), Data(#"{"server":{"accessToken":"mcp-secret"}}"#.utf8))
@@ -406,7 +407,7 @@ final class SwitcherTests: XCTestCase {
         // tokens, so the live login is the only valid Personal copy.
         item.data = Fixture.envelope(Fixture.oauth("personal-rotated"))
         journal.pending = PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now)
-        try await makeSwitcher().restoreUnfinishedSwitch()
+        _ = try await makeSwitcher().restoreUnfinishedSwitch { _ in nil }
         XCTAssertEqual(try savedRecord(Fixture.personal).current.claudeAiOauth, Fixture.oauth("personal-rotated"))
         XCTAssertEqual(try savedRecord(Fixture.personal).previous?.claudeAiOauth, Fixture.oauth("personal"))
         XCTAssertEqual(try Envelope(XCTUnwrap(item.data)).claudeAiOauth(), Fixture.oauth("team-old"))
@@ -418,7 +419,7 @@ final class SwitcherTests: XCTestCase {
         let pending = PendingSwitch(fromId: Fixture.team.id, toId: Fixture.personal.id, startedAt: Fixture.now)
         journal.pending = pending
         await assertThrowsCase({ if case .ownershipUnverified = $0 { true } else { false } }) {
-            try await self.makeSwitcher().restoreUnfinishedSwitch()
+            try await self.makeSwitcher().restoreUnfinishedSwitch { _ in nil }
         }
         XCTAssertTrue(item.writes.isEmpty)
         XCTAssertEqual(store.writes, 0)

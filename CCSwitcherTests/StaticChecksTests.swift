@@ -90,9 +90,56 @@ final class StaticChecksTests: XCTestCase {
     func testNoSecretsInLogOrProcessEnvironment() throws {
         for file in try sources() {
             let content = try text(file)
-            for pattern in [#"\.environment\b"#, #"\bprint\("#, #"\bNSLog\("#, #"\bdebugPrint\("#] {
+            for pattern in [#"\bprint\("#, #"\bNSLog\("#, #"\bdebugPrint\("#] {
                 XCTAssertNil(content.range(of: pattern, options: .regularExpression), "\(pattern) in \(file.lastPathComponent)")
             }
+            // Only the login runner sets a child's environment, and only to
+            // the allowlisted one it was given.
+            let environmentLines = content.components(separatedBy: "\n")
+                .filter { $0.range(of: #"\.environment\b"#, options: .regularExpression) != nil }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if file.lastPathComponent == "LoginRunner.swift" {
+                XCTAssertEqual(environmentLines, ["process.environment = command.environment"])
+            } else {
+                XCTAssertEqual(environmentLines, [], file.lastPathComponent)
+            }
+        }
+    }
+
+    /// Processes are started in two places only: `security` (SecurityTool in
+    /// ClaudeItem.swift) and the Add account login runner.
+    func testProcessOnlyWhereNeeded() throws {
+        var users: Set<String> = []
+        for file in try sources() {
+            let content = try text(file)
+            if content.range(of: #"\bProcess\b"#, options: .regularExpression) != nil {
+                users.insert(file.lastPathComponent)
+            }
+            for spawn in [#"\bNSTask\b"#, #"\bposix_spawn"#, #"\bpopen\("#, #"\bsystem\("#, #"\bexecv"#, #"\bfork\("#] {
+                XCTAssertNil(content.range(of: spawn, options: .regularExpression), "\(spawn) in \(file.lastPathComponent)")
+            }
+        }
+        XCTAssertEqual(users, ["ClaudeItem.swift", "LoginRunner.swift"])
+    }
+
+    /// The login runner runs the resolved `claude` directly: no shell, no
+    /// PATH search, nothing read from the app's own environment, and no
+    /// browser override.
+    func testLoginRunnerRunsNoShellAndPassesNoBrowser() throws {
+        let content = try text(root.appendingPathComponent("Sources/LoginRunner.swift"))
+        for banned in ["/bin/sh", "bash", "/bin/zsh", "-lc", "-ilc", #""-c""#, "/usr/bin/env", "ProcessInfo",
+                       "getenv", "launchPath", "which"] {
+            XCTAssertFalse(content.contains(banned), banned)
+        }
+        XCTAssertNil(content.range(of: #"\benviron\b"#, options: .regularExpression))
+        XCTAssertTrue(content.contains("guard let executable = command.argv.first"))
+        XCTAssertTrue(content.contains("process.executableURL = URL(fileURLWithPath: executable)"))
+        XCTAssertTrue(content.contains("process.arguments = Array(command.argv.dropFirst())"))
+        XCTAssertTrue(content.contains("process.standardInput = FileHandle.nullDevice"))
+        XCTAssertEqual(content.components(separatedBy: "executableURL").count - 1, 1)
+        // Nothing in the app names the variable that redirects the browser.
+        for file in try sources() {
+            XCTAssertFalse(try text(file).contains("BROWSER"), file.lastPathComponent)
         }
     }
 }

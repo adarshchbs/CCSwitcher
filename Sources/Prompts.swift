@@ -14,14 +14,34 @@ enum Prompts {
         return run(alert) == .alertFirstButtonReturn
     }
 
-    static func askLabel(suggestion: String) -> String? {
+    static func confirmAddAccount(current label: String) -> Bool {
         let alert = NSAlert()
-        alert.messageText = "Save current login"
-        alert.informativeText = "Name this account:"
+        alert.messageText = "Sign in to another organization"
+        alert.informativeText = """
+            CCSwitcher first backs up your current login (\(label)). Your browser opens; choose the organization \
+            there. Running Claude sessions keep using the old login until you restart them.
+            """
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        return run(alert) == .alertFirstButtonReturn
+    }
+
+    static func askLabelBeforeRestore(suggestion: String, restoring from: String) -> String? {
+        askLabel(suggestion: suggestion, title: "Save the new login first?",
+                 text: "Claude Code is using a login for an organization you haven't saved. CCSwitcher saves it before "
+                    + "restoring \(from), so it isn't lost. Name it, or cancel to change nothing:",
+                 button: "Save and Restore")
+    }
+
+    static func askLabel(suggestion: String, title: String = "Save current login",
+                         text: String = "Name this account:", button: String = "Save") -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = suggestion
         alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: button)
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         return run(alert) == .alertFirstButtonReturn ? field.stringValue : nil
@@ -52,19 +72,33 @@ enum Prompts {
         case later
     }
 
-    static func recoverUnfinishedSwitch(from: String?, to: String?, startedAt: Date) -> Recovery {
+    static func recoverUnfinishedSwitch(from: String?, to: String?, kind: PendingSwitch.Kind, startedAt: Date) -> Recovery {
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "A switch didn't finish"
         let when = startedAt == .distantPast ? "" : " at \(startedAt.formatted(date: .abbreviated, time: .shortened))"
-        alert.informativeText = """
-            A switch from \(from ?? "an unknown account") to \(to ?? "an unknown account") started\(when) and was \
-            interrupted. Claude Code's Keychain item and ~/.claude.json may disagree. Switching is blocked until you \
-            choose.
+        switch kind {
+        case .switch:
+            alert.messageText = "A switch didn't finish"
+            alert.informativeText = """
+                A switch from \(from ?? "an unknown account") to \(to ?? "an unknown account") started\(when) and was \
+                interrupted. Claude Code's Keychain item and ~/.claude.json may disagree. Switching is blocked until \
+                you choose.
 
-            Restore puts back \(from ?? "the earlier login") after saving whatever login is live now to the account it \
-            belongs to. Choose "I've fixed it" if you already fixed the login yourself (for example with `claude /login`).
-            """
+                Restore puts back \(from ?? "the earlier login") after saving whatever login is live now to the account \
+                it belongs to. Choose "I've fixed it" if you already fixed the login yourself (for example with \
+                `claude /login`).
+                """
+        case .login:
+            alert.messageText = "Adding an account didn't finish"
+            alert.informativeText = """
+                A sign-in started\(when) while \(from ?? "an unknown account") was active didn't finish, or CCSwitcher \
+                couldn't confirm which organization the new login belongs to. Switching is blocked until you choose.
+
+                Restore puts back \(from ?? "the earlier login"). If the live login belongs to an organization you \
+                haven't saved, CCSwitcher offers to save it first. Choose "I've fixed it" to keep the current login \
+                as it is.
+                """
+        }
         if let from {
             alert.addButton(withTitle: "Restore \(from)")
         }

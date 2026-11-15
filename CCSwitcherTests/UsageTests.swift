@@ -106,7 +106,8 @@ final class UsageTests: XCTestCase {
         store.items[Fixture.personal.id] = try Fixture.stored("personal", org: "org-personal")
         let switcher = Switcher(item: item, store: store, config: FakeConfig(Fixture.profile(org: "org-team")),
                                 accounts: FakeAccounts([Fixture.team, Fixture.personal]), sessions: FakeSessions(),
-                                lookup: FakeLookup(), clock: FixedClock(date: now), journal: FakeJournal())
+                                lookup: FakeLookup(), clock: FixedClock(date: now), journal: FakeJournal(),
+                                cli: Fixture.noCLI, login: FakeLoginRunner())
 
         let tokens = try await switcher.usageTokens()
         XCTAssertEqual(tokens[Fixture.team.id]?.accessToken, "team-live-access")

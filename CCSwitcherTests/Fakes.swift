@@ -165,6 +165,31 @@ struct FakeSessions: SessionListing {
     func liveSessions() -> [LiveSession] { sessions }
 }
 
+/// Stands in for `claude auth login`. Records each command and runs
+/// `onRun` in its place (to change the live login the way the CLI would), then
+/// returns `end`. Never starts a process.
+final class FakeLoginRunner: LoginRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _commands: [LoginCommand] = []
+    private var _timeouts: [TimeInterval] = []
+    var end: LoginEnd = .exited(0)
+    var error: Error?
+    var onRun: (@Sendable () async -> Void)?
+
+    var commands: [LoginCommand] { lock.withLock { _commands } }
+    var timeouts: [TimeInterval] { lock.withLock { _timeouts } }
+
+    func run(_ command: LoginCommand, timeout: TimeInterval, cancellation: LoginCancellation) async throws -> LoginEnd {
+        lock.withLock {
+            _commands.append(command)
+            _timeouts.append(timeout)
+        }
+        if let error { throw error }
+        await onRun?()
+        return end
+    }
+}
+
 struct TestFailure: Error {}
 
 /// A mutable cell that test closures can write to.
@@ -219,6 +244,9 @@ enum Fixture {
             "organizationName": AnyCodable(org.uppercased()),
         ])
     }
+
+    /// No `claude` anywhere: Add account fails before changing anything.
+    static let noCLI = ClaudeCLI(candidates: [], environment: [:])
 
     static func stored(_ name: String, org: String) throws -> Data {
         try StoredLogin(claudeAiOauth: oauth(name), profile: profile(org: org)).encoded()

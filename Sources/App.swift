@@ -23,7 +23,7 @@ struct CCSwitcherApp: App {
 /// ✓ Team (Acme)    5h 42% · 7d 63%
 ///   Personal        5h 3% · 7d 18%  (as of 14:02)
 /// ───
-/// Save current login… / Refresh usage / Settings…
+/// Save current login… / Add account… / Refresh usage / Settings…
 /// ───
 /// Quit
 struct MenuContent: View {
@@ -41,6 +41,10 @@ struct MenuContent: View {
                 ))
             }
         }
+        if model.signingIn != nil {
+            Text("Waiting for sign-in in your browser…")
+            Button("Cancel sign-in") { model.cancelSignIn() }
+        }
         if model.unfinished != nil {
             Button("⚠︎ A switch didn't finish. Resolve…") { model.resolveUnfinishedSwitchNow() }
         }
@@ -52,6 +56,8 @@ struct MenuContent: View {
         }
         Divider()
         Button("Save current login…") { model.saveCurrentLogin() }
+        Button("Add account…") { model.addAccount() }
+            .disabled(model.signingIn != nil)
         Button("Refresh usage") { model.refreshUsageNow() }
         SettingsLink { Text("Settings…") }
         Divider()
@@ -66,7 +72,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             if model.accounts.isEmpty {
-                Text("No saved logins. Log in with `claude /login`, then choose Save current login… from the menu.")
+                Text("No saved logins. Choose Add account… from the menu, or log in with `claude /login` and choose Save current login….")
                     .foregroundStyle(.secondary)
             }
             ForEach(model.accounts) { account in

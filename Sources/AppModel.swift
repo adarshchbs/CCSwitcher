@@ -17,6 +17,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveMismatch = false
     /// A switch that was interrupted before it verified or rolled back.
     @Published private(set) var unfinished: PendingSwitch?
+    /// Set while `claude auth login` waits for the browser; "Cancel sign-in"
+    /// cancels it.
+    @Published private(set) var signingIn: LoginCancellation?
 
     private let switcher: Switcher
     private let usageClient: UsageClient
@@ -36,7 +39,8 @@ final class AppModel: ObservableObject {
         switcher = Switcher(item: ClaudeItem(keychain: keychain), store: AccountStore(keychain: keychain),
                             config: ClaudeConfig(), accounts: DefaultsAccountList(defaults: defaults),
                             sessions: SessionGuard(), lookup: ProfileClient(http: http), clock: clock,
-                            journal: DefaultsSwitchJournal(defaults: defaults))
+                            journal: DefaultsSwitchJournal(defaults: defaults),
+                            cli: ClaudeCLI.standard(), login: ProcessLoginRunner())
         usageClient = UsageClient(http: http, clock: clock)
         cache = UsageCache(defaults: defaults)
 
@@ -107,6 +111,37 @@ final class AppModel: ObservableObject {
             case .cancelled: break
             }
         }
+    }
+
+    /// "Add account…": backs up the current login, runs
+    /// `claude auth login --claudeai`, then saves whatever organization the
+    /// user signed in to.
+    func addAccount() {
+        let cancellation = LoginCancellation()
+        perform(resolvingAfter: true) {
+            defer { self.signingIn = nil }
+            let outcome = try await self.switcher.addAccount(
+                confirm: { label in await Prompts.confirmAddAccount(current: label) },
+                loginStarted: { await self.showSigningIn(cancellation) },
+                askLabel: { suggestion in await Prompts.askLabel(suggestion: suggestion, title: "Save new account") },
+                cancellation: cancellation)
+            log.info("Add account outcome: \(String(describing: outcome), privacy: .public)")
+            self.signingIn = nil
+            switch outcome {
+            case .added, .updated: self.lastUsageFetch = nil
+            case .unsaved, .notCompleted, .cancelled: break
+            }
+            if let message = outcome.message { Prompts.inform(message.title, message.text) }
+        }
+    }
+
+    /// The menu's "Cancel sign-in" item.
+    func cancelSignIn() {
+        signingIn?.cancel()
+    }
+
+    private func showSigningIn(_ cancellation: LoginCancellation) {
+        signingIn = cancellation
     }
 
     func refreshUsageNow() {
@@ -232,10 +267,15 @@ final class AppModel: ObservableObject {
         let from = accounts.first { $0.id == pending.fromId }?.label
         let to = accounts.first { $0.id == pending.toId }?.label
         do {
-            switch Prompts.recoverUnfinishedSwitch(from: from, to: to, startedAt: pending.startedAt) {
+            switch Prompts.recoverUnfinishedSwitch(from: from, to: to, kind: pending.kind, startedAt: pending.startedAt) {
             case .restore:
-                try await switcher.restoreUnfinishedSwitch()
-                Prompts.inform("Restored \(from ?? "the previous login")", "Claude Code is back on the login it used before the unfinished switch.")
+                let restoring = from ?? "the previous login"
+                let outcome = try await switcher.restoreUnfinishedSwitch { suggestion in
+                    await Prompts.askLabelBeforeRestore(suggestion: suggestion, restoring: restoring)
+                }
+                if outcome == .restored {
+                    Prompts.inform("Restored \(restoring)", "Claude Code is back on the login it used before.")
+                }
             case .dismiss:
                 try await switcher.dismissUnfinishedSwitch()
             case .later:
@@ -250,7 +290,10 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
+    /// `resolvingAfter`: if the operation leaves a journal behind (an Add
+    /// account whose result couldn't be settled), show the recovery alert
+    /// right away.
+    private func perform(resolvingAfter: Bool = false, _ operation: @escaping @MainActor () async throws -> Void) {
         Task {
             if await resolveUnfinishedSwitch() {
                 await reload()
@@ -264,6 +307,9 @@ final class AppModel: ObservableObject {
                 Prompts.showUnexpected(error)
             }
             await reload()
+            if resolvingAfter, unfinished != nil, await resolveUnfinishedSwitch() {
+                await reload()
+            }
             await refreshUsage(force: false)
         }
     }

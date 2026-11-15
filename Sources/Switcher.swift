@@ -25,6 +25,10 @@ enum SwitchError: Error, Equatable {
     case removeFailed(String)
     case invalidLabel
     case metadata(String)
+    case claudeNotFound([String])
+    case loginDidNotStart(String)
+    case loginChangedBeforeAdd
+    case newLoginUnverified(String)
 
     /// Why ownership can't be proven when the token is expired and matches no
     /// saved login.
@@ -57,6 +61,10 @@ enum SwitchError: Error, Equatable {
         case .removeFailed(let why): "Couldn't delete the saved login, so the account was kept: \(why)"
         case .invalidLabel: "The account name can't be empty."
         case .metadata(let why): "Couldn't read or save the account list: \(why)"
+        case .claudeNotFound(let searched): "Couldn't find Claude Code's `claude` command. Looked in: \(searched.joined(separator: ", ")). Nothing was changed."
+        case .loginDidNotStart(let why): "Couldn't start `claude auth login` (\(why))."
+        case .loginChangedBeforeAdd: "The Claude login changed while the dialog was open. Nothing was changed. Try again."
+        case .newLoginUnverified(let why): "Claude Code's login changed, but CCSwitcher can't confirm which organization the new login belongs to: \(why). Nothing was saved."
         }
     }
 
@@ -79,6 +87,48 @@ enum SaveOutcome: Equatable, Sendable {
     case added(SavedAccount)
     case updated(SavedAccount)
     case cancelled
+}
+
+enum AddAccountOutcome: Equatable, Sendable {
+    /// Signed in to a new organization, saved under the label given.
+    case added(SavedAccount)
+    /// Signed in to an organization that was already saved; its saved login
+    /// now holds the new tokens.
+    case updated(SavedAccount)
+    /// Signed in to a new organization, but the label prompt was cancelled:
+    /// the login is live and not saved.
+    case unsaved
+    /// The live login didn't change; nothing was changed.
+    case notCompleted(LoginEnd)
+    /// The confirmation was declined.
+    case cancelled
+
+    /// What to tell the user, or nil for nothing.
+    var message: (title: String, text: String)? {
+        switch self {
+        case .added(let account):
+            ("Added \(account.label)", "You're signed in to \(account.label), and its login is saved. Running Claude sessions keep using the old login until you restart them.")
+        case .updated(let account):
+            ("Updated \(account.label)", "You signed in to \(account.label) again; its saved login was updated.")
+        case .unsaved:
+            ("New login not saved", "Claude Code now uses the login you just signed in to, but it isn't saved yet. Choose Save current login… to save it.")
+        case .notCompleted(.timedOut):
+            ("Sign-in timed out", "Sign-in didn't complete within 10 minutes; nothing changed.")
+        case .notCompleted(.cancelled):
+            ("Sign-in cancelled", "Sign-in didn't complete; nothing changed.")
+        case .notCompleted(.exited):
+            ("Sign-in didn't complete", "Sign-in didn't complete; nothing changed.")
+        case .cancelled:
+            nil
+        }
+    }
+}
+
+enum RecoveryOutcome: Equatable, Sendable {
+    case restored
+    /// The user declined to save the unsaved live login; nothing changed.
+    case cancelled
+    case nothingPending
 }
 
 /// Whether the live Keychain token belongs to the organization
@@ -104,11 +154,13 @@ actor Switcher {
     private let lookup: OrgLookup
     private let clock: Clock
     private let journal: SwitchJournal
+    private let cli: ClaudeCLI
+    private let login: LoginRunning
     private var busy = false
 
     init(item: ClaudeItemAccess, store: SavedLoginStore, config: ClaudeProfileAccess,
          accounts: AccountList, sessions: SessionListing, lookup: OrgLookup, clock: Clock,
-         journal: SwitchJournal) {
+         journal: SwitchJournal, cli: ClaudeCLI, login: LoginRunning) {
         self.item = item
         self.store = store
         self.config = config
@@ -117,6 +169,8 @@ actor Switcher {
         self.lookup = lookup
         self.clock = clock
         self.journal = journal
+        self.cli = cli
+        self.login = login
     }
 
     // MARK: - Reads
@@ -137,14 +191,20 @@ actor Switcher {
         }
     }
 
-    /// The interrupted switch, if any. A record that no longer decodes still
-    /// counts (with empty ids), so it can't silently unblock switching.
+    /// The interrupted switch or Add account, if any. While an operation runs
+    /// the journal is its own, not an interrupted one, so this returns nil.
     func unfinishedSwitch() throws -> PendingSwitch? {
+        busy ? nil : try loadJournal()
+    }
+
+    /// A record that no longer decodes still counts (with empty ids), so it
+    /// can't silently unblock switching.
+    private func loadJournal() throws -> PendingSwitch? {
         do {
             return try journal.load()
         } catch let error as DecodingError {
             log.error("Pending-switch journal doesn't decode: \(String(describing: error), privacy: .public)")
-            return PendingSwitch(fromId: "", toId: "", startedAt: .distantPast)
+            return PendingSwitch(fromId: "", toId: "", kind: .switch, startedAt: .distantPast)
         } catch {
             throw SwitchError.metadata("pending-switch journal: \(describe(error))")
         }
@@ -203,7 +263,7 @@ actor Switcher {
 
         var saved = try loadAccounts()
         let existing = saved.owner(ofOrg: org)
-        var account: SavedAccount
+        let account: SavedAccount
         if let existing {
             account = existing
         } else {
@@ -220,17 +280,143 @@ actor Switcher {
 
         try await verifyOwner(live.login, org: org, saved: saved)
         try backUp(StoredLogin(claudeAiOauth: live.claudeAiOauth, profile: live.profile), to: account)
-        account.email = live.profile.emailAddress ?? account.email
-        account.orgName = live.profile.organizationName
-        account.plan = live.login.subscriptionType
-        if let index = saved.firstIndex(where: { $0.id == account.id }) {
-            saved[index] = account
-        } else {
-            saved.append(account)
+        let stored = try storeMetadata(of: live, for: account, in: saved)
+        log.info("Saved login for account \(stored.id, privacy: .public)")
+        return existing == nil ? .added(stored) : .updated(stored)
+    }
+
+    // MARK: - Add account
+
+    /// Signs in to another organization by running `claude auth login`, after
+    /// backing up the current login. See "Add account" in docs/FORK_SPEC.md
+    /// for the steps. `confirm` gets the current account's label;
+    /// `loginStarted` runs just before the CLI starts.
+    func addAccount(confirm: @Sendable (String) async -> Bool,
+                    loginStarted: @Sendable () async -> Void,
+                    askLabel: @Sendable (String) async -> String?,
+                    cancellation: LoginCancellation) async throws -> AddAccountOutcome {
+        try begin()
+        defer { busy = false }
+
+        let command: LoginCommand
+        do { command = try cli.loginCommand() } catch ClaudeCLI.Failure.notFound(let searched) {
+            throw SwitchError.claudeNotFound(searched)
         }
-        try saveAccounts(saved)
-        log.info("Saved login for account \(account.id, privacy: .public)")
-        return existing == nil ? .added(account) : .updated(account)
+        let saved = try loadAccounts()
+        guard let shown = try liveOwner() else { throw SwitchError.ownerUnknown }
+        guard await confirm(shown.label) else { return .cancelled }
+
+        // The switch's steps 2 and 3: find and prove the owner, back it up.
+        let before = try readLiveLogin()
+        guard let owner = saved.owner(ofOrg: before.profile.organizationUuid) else { throw SwitchError.ownerUnknown }
+        guard owner.id == shown.id else { throw SwitchError.loginChangedBeforeAdd }
+        try await verifyOwner(before.login, org: owner.orgUuid, saved: saved)
+        try backUp(StoredLogin(claudeAiOauth: before.claudeAiOauth, profile: before.profile), to: owner)
+
+        // From here the live login may change. The journal stays until the
+        // result is settled, so an interruption or an unprovable result
+        // shows the recovery alert.
+        try saveJournal(PendingSwitch(fromId: owner.id, toId: nil, kind: .login, startedAt: clock.now()))
+        await loginStarted()
+        let end: LoginEnd
+        do {
+            end = try await login.run(command, timeout: ClaudeCLI.timeout, cancellation: cancellation)
+        } catch {
+            if try liveUnchanged(since: before, owner: owner) { journal.clear() }
+            throw SwitchError.loginDidNotStart(describe(error))
+        }
+        log.info("Sign-in ended: \(String(describing: end), privacy: .public)")
+
+        // Inspect the result, whatever the exit status.
+        let after: LiveLogin
+        do { after = try readLiveLogin() } catch let error as SwitchError {
+            throw SwitchError.newLoginUnverified(error.message)
+        }
+        if Self.sameBytes(after.login.refreshToken, before.login.refreshToken) {
+            // The item and the profile must still agree.
+            guard after.profile.organizationUuid == owner.orgUuid else { throw SwitchError.liveLoginMismatch }
+            journal.clear()
+            return .notCompleted(end)
+        }
+        guard let org = after.profile.organizationUuid else {
+            throw SwitchError.newLoginUnverified("~/.claude.json has no organizationUuid")
+        }
+        let orgName = try await proveNewLogin(after.login, org: org, saved: try loadAccounts())
+
+        var accounts = try loadAccounts()
+        let sameOrg = accounts.filter { $0.orgUuid == org }
+        if sameOrg.count > 1 { throw SwitchError.metadata("more than one saved account has this organization") }
+        if let existing = sameOrg.first {
+            try backUp(StoredLogin(claudeAiOauth: after.claudeAiOauth, profile: after.profile), to: existing)
+            let updated = try storeMetadata(of: after, for: existing, in: accounts)
+            journal.clear()
+            log.info("Add account signed in to saved account \(existing.id, privacy: .public) again")
+            return .updated(updated)
+        }
+
+        let suggestion = orgName ?? after.profile.organizationName ?? after.profile.emailAddress ?? "Claude"
+        let label = (await askLabel(suggestion) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else {
+            journal.clear()
+            log.info("Add account: new login left unsaved")
+            return .unsaved
+        }
+        // The login may have changed while the prompt was open.
+        let again = try readLiveLogin()
+        guard again.claudeAiOauth == after.claudeAiOauth, again.profile.organizationUuid == org else {
+            throw SwitchError.loginChangedDuringSave
+        }
+        accounts = try loadAccounts()
+        let account = SavedAccount(id: UUID().uuidString, label: label, email: "", orgUuid: org)
+        try backUp(StoredLogin(claudeAiOauth: after.claudeAiOauth, profile: after.profile), to: account)
+        let added = try storeMetadata(of: after, for: account, in: accounts)
+        journal.clear()
+        log.info("Add account saved new account \(added.id, privacy: .public)")
+        return .added(added)
+    }
+
+    /// Whether the live login is still the one backed up before the sign-in.
+    /// Anything unreadable counts as changed, so the journal stays.
+    private func liveUnchanged(since before: LiveLogin, owner: SavedAccount) throws -> Bool {
+        do {
+            let now = try readLiveLogin()
+            return Self.sameBytes(now.login.refreshToken, before.login.refreshToken)
+                && now.profile.organizationUuid == owner.orgUuid
+        } catch let error as SwitchError {
+            log.notice("Can't reread the live login: \(self.describe(error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Proves a freshly signed-in login belongs to `org` (what
+    /// `~/.claude.json` names) with the profile endpoint, and returns the
+    /// organization's name from it. A refresh token saved for another
+    /// account fails it; so does anything the endpoint can't confirm.
+    private func proveNewLogin(_ login: OAuthLogin, org: String, saved: [SavedAccount]) async throws -> String? {
+        for account in saved where account.orgUuid != org {
+            let tokens: OAuthLogin
+            do { tokens = try StoredLogin(decoding: store.read(id: account.id)).login() }
+            catch let error where Self.isReadFailure(error) { continue }
+            if Self.sameBytes(tokens.refreshToken, login.refreshToken) {
+                log.error("New login's refresh token is the one saved for \(account.id, privacy: .public)")
+                throw SwitchError.liveLoginMismatch
+            }
+        }
+        if let expiresAt = login.expiresAt, expiresAt <= clock.now() {
+            throw SwitchError.newLoginUnverified("its access token has already expired")
+        }
+        switch try await lookup.organization(accessToken: login.accessToken) {
+        case .organization(let uuid, let name):
+            guard uuid == org else {
+                log.error("Profile endpoint names another organization than ~/.claude.json: \(name ?? "?", privacy: .private)")
+                throw SwitchError.liveLoginMismatch
+            }
+            return name
+        case .unauthorized:
+            throw SwitchError.newLoginUnverified("Anthropic rejected its access token")
+        case .failed(let why):
+            throw SwitchError.newLoginUnverified("the organization check with Anthropic failed (\(why))")
+        }
     }
 
     // MARK: - Switch
@@ -314,15 +500,19 @@ actor Switcher {
     // MARK: - Unfinished switch
 
     /// "Restore <from>": puts back the login from before the interrupted
-    /// switch. Whatever login is live first goes to the saved account it
-    /// provably belongs to, since it may be the only valid copy (Claude Code
-    /// may have rotated it). If that can't be proven, nothing is written.
-    func restoreUnfinishedSwitch() async throws {
+    /// switch or Add account. Whatever login is live first goes to the saved
+    /// account it provably belongs to, since it may be the only valid copy
+    /// (Claude Code may have rotated it). After an Add account that is often
+    /// a new organization no saved account can prove: if the profile endpoint
+    /// proves the live login is the org `~/.claude.json` names, `askLabel`
+    /// offers to save it as a new account first, and nil changes nothing. If
+    /// nothing can be proven, nothing is written.
+    func restoreUnfinishedSwitch(askLabel: @Sendable (String) async -> String?) async throws -> RecoveryOutcome {
         try begin(allowUnfinished: true)
         defer { busy = false }
-        guard let pending = try unfinishedSwitch() else { return }
+        guard let pending = try loadJournal() else { return .nothingPending }
 
-        let saved = try loadAccounts()
+        var saved = try loadAccounts()
         guard let from = saved.first(where: { $0.id == pending.fromId }) else { throw SwitchError.unknownAccount }
         let fromTokens: OAuthLogin
         do { fromTokens = try storedLogin(for: from).login() } catch let error as SwitchError { throw error }
@@ -332,7 +522,30 @@ actor Switcher {
         try preauthorize()
         let live = try readLiveLogin()
 
-        if !Self.sameBytes(live.login.refreshToken, fromTokens.refreshToken) {
+        if !Self.sameBytes(live.login.refreshToken, fromTokens.refreshToken), pending.toId == nil {
+            if try await ownership(of: live.login, org: from.orgUuid, saved: saved, strict: true) == .proven {
+                try backUp(StoredLogin(claudeAiOauth: live.claudeAiOauth, profile: storedLogin(for: from).profile), to: from)
+            } else if let org = live.profile.organizationUuid, let owner = saved.owner(ofOrg: org),
+                      try await ownership(of: live.login, org: org, saved: saved, strict: true) == .proven {
+                try backUp(StoredLogin(claudeAiOauth: live.claudeAiOauth, profile: live.profile), to: owner)
+            } else if let org = live.profile.organizationUuid, !saved.contains(where: { $0.orgUuid == org }),
+                      try await ownership(of: live.login, org: org, saved: saved, strict: true) == .proven {
+                let suggestion = live.profile.organizationName ?? live.profile.emailAddress ?? "Claude"
+                let label = (await askLabel(suggestion) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !label.isEmpty else { return .cancelled }
+                let again = try readLiveLogin()
+                guard again.claudeAiOauth == live.claudeAiOauth, again.profile.organizationUuid == org else {
+                    throw SwitchError.loginChangedDuringSave
+                }
+                saved = try loadAccounts()
+                let account = SavedAccount(id: UUID().uuidString, label: label, email: "", orgUuid: org)
+                try backUp(StoredLogin(claudeAiOauth: live.claudeAiOauth, profile: live.profile), to: account)
+                _ = try storeMetadata(of: live, for: account, in: saved)
+                log.info("Saved the unsaved live login as \(account.id, privacy: .public) before restoring")
+            } else {
+                throw SwitchError.ownershipUnverified(SwitchError.expiredAndUnmatched)
+            }
+        } else if !Self.sameBytes(live.login.refreshToken, fromTokens.refreshToken) {
             let to = saved.first { $0.id == pending.toId }
             if let to, try await ownership(of: live.login, org: to.orgUuid, saved: saved, strict: true) == .proven {
                 try backUp(StoredLogin(claudeAiOauth: live.claudeAiOauth, profile: storedLogin(for: to).profile), to: to)
@@ -365,6 +578,7 @@ actor Switcher {
         }
         journal.clear()
         log.info("Restored \(from.id, privacy: .public) after an unfinished switch")
+        return .restored
     }
 
     /// "I've fixed it": forgets the interrupted switch. Changes nothing else.
@@ -501,7 +715,7 @@ actor Switcher {
 
     private func begin(allowUnfinished: Bool = false) throws {
         guard !busy else { throw SwitchError.busy }
-        if !allowUnfinished, try unfinishedSwitch() != nil { throw SwitchError.switchUnfinished }
+        if !allowUnfinished, try loadJournal() != nil { throw SwitchError.switchUnfinished }
         busy = true
     }
 
@@ -653,6 +867,23 @@ actor Switcher {
         }
         journal.clear()
         throw SwitchError.rolledBack(describe(cause))
+    }
+
+    /// Records the live login's email, org name and plan on `account`, adds
+    /// or replaces it in `saved`, and saves the list. Returns the account.
+    private func storeMetadata(of live: LiveLogin, for account: SavedAccount, in saved: [SavedAccount]) throws -> SavedAccount {
+        var account = account
+        var saved = saved
+        account.email = live.profile.emailAddress ?? account.email
+        account.orgName = live.profile.organizationName
+        account.plan = live.login.subscriptionType
+        if let index = saved.firstIndex(where: { $0.id == account.id }) {
+            saved[index] = account
+        } else {
+            saved.append(account)
+        }
+        try saveAccounts(saved)
+        return account
     }
 
     private func loadAccounts() throws -> [SavedAccount] {
