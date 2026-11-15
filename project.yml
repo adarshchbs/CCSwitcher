@@ -1,156 +1,63 @@
 name: CCSwitcher
 options:
-  bundleIdPrefix: me.xueshi
+  bundleIdPrefix: com.adarshchbs
   deploymentTarget:
     macOS: "14.0"
   xcodeVersion: "16.0"
-  generateEmptyDirectories: true
   developmentLanguage: en
-  knownRegions:
-    - en
-    - zh-Hans
-    - ja
-    - de
-    - fr
-    - es
-
-packages:
-  Aptabase:
-    url: https://github.com/aptabase/aptabase-swift
-    exactVersion: "0.4.0"
-  GRDB:
-    url: https://github.com/groue/GRDB.swift
-    exactVersion: "7.10.0"
-  Sparkle:
-    url: https://github.com/sparkle-project/Sparkle
-    from: 2.9.0
 
 settings:
   base:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
-    ENABLE_HARDENED_RUNTIME: false
-    CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: 584KQTRF3B
-    SWIFT_STRICT_CONCURRENCY: targeted
-  configs:
-    # CI ships the output of `xcodebuild build`, which (unlike Archive) does
-    # not strip symbols. Do in every Release build what Archive does. The
-    # dSYMs are still generated before stripping.
-    Release:
-      DEPLOYMENT_POSTPROCESSING: YES
-      STRIP_INSTALLED_PRODUCT: YES
-      STRIP_STYLE: all
-      DEAD_CODE_STRIPPING: YES
+    # Ad hoc signing: no team, no certificate.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
 
 targets:
   CCSwitcher:
     type: application
     platform: macOS
     sources:
-      - path: CCSwitcher
-      - path: Shared
+      - path: Sources
+      - path: Resources/Assets.xcassets
     info:
-      path: CCSwitcher/Info.plist
+      path: Resources/Info.plist
       properties:
         LSUIElement: true
         CFBundleDisplayName: $(PRODUCT_NAME)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        CFBundleURLTypes:
-          - CFBundleURLName: me.xueshi.ccswitcher
-            CFBundleURLSchemes:
-              - ccswitcher
-        # Sparkle: feed URL points at the always-latest release's appcast asset.
-        # CI uploads `appcast.xml` to each release alongside the DMG.
-        SUFeedURL: https://github.com/XueshiQiao/CCSwitcher/releases/latest/download/appcast.xml
-        # Public EdDSA key. The matching private key is the `SPARKLE_EDDSA_KEY`
-        # GitHub secret used by CI to sign each DMG.
-        SUPublicEDKey: N9jOZ2Xyo63FdNvkDCRiMwXFnFglOqTdmx6nw7ZwTS4=
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: me.xueshi.ccswitcher
-        CODE_SIGN_ENTITLEMENTS: CCSwitcher/Resources/CCSwitcher.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.adarshchbs.ccswitcher
         PRODUCT_NAME: CCSwitcher
-        MARKETING_VERSION: "2.1.5"
-        CURRENT_PROJECT_VERSION: "73"
-        COMBINE_HIDPI_IMAGES: true
+        MARKETING_VERSION: "3.0.0-fork.1"
+        CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-    entitlements:
-      path: CCSwitcher/Resources/CCSwitcher.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - 584KQTRF3B.me.xueshi.ccswitcher
-    dependencies:
-      - target: CCSwitcherWidgetExtension
-        embed: true
-        codeSign: true
-      - package: Sparkle
-      - package: GRDB
-      - package: Aptabase
+        COMBINE_HIDPI_IMAGES: true
+        # Not sandboxed: the app reads and writes ~/.claude.json and Claude
+        # Code's Keychain item. No entitlements file.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
 
-  CCSwitcherWidgetExtension:
-    type: extensionkit-extension
-    platform: macOS
-    sources:
-      - path: CCSwitcherWidget
-      - path: Shared
-    info:
-      path: CCSwitcherWidget/Info.plist
-      properties:
-        CFBundleDisplayName: CCSwitcher Widget
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        EXAppExtensionAttributes:
-          EXExtensionPointIdentifier: com.apple.widgetkit-extension
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: me.xueshi.ccswitcher.widget
-        CODE_SIGN_ENTITLEMENTS: CCSwitcherWidget/Resources/CCSwitcherWidget.entitlements
-        PRODUCT_NAME: CCSwitcherWidgetExtension
-        MARKETING_VERSION: "2.1.5"
-        CURRENT_PROJECT_VERSION: "73"
-        SWIFT_VERSION: "6.0"
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 584KQTRF3B
-        SWIFT_STRICT_CONCURRENCY: targeted
-        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
-        SKIP_INSTALL: true
-    entitlements:
-      path: CCSwitcherWidget/Resources/CCSwitcherWidget.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.application-groups:
-          - 584KQTRF3B.me.xueshi.ccswitcher
-
+  # The tests compile the app's logic directly instead of loading it into the
+  # app: a hosted test bundle would launch CCSwitcher, and the app must never
+  # run against the real Keychain or ~/.claude.json during tests.
   CCSwitcherTests:
     type: bundle.unit-test
     platform: macOS
     sources:
       - path: CCSwitcherTests
-      - path: CCSwitcher/Services/UsageDatabase.swift
-      - path: CCSwitcher/Services/SessionUsageStore.swift
-      - path: CCSwitcher/Services/SessionTranscriptParser.swift
-      - path: CCSwitcher/Services/CostParser.swift
-      - path: CCSwitcher/Services/PricingService.swift
-      - path: CCSwitcher/Services/L10n.swift
-      - path: CCSwitcher/Models/CostData.swift
-      - path: CCSwitcher/Models/ActivityData.swift
-      - path: CCSwitcher/Models/SubscriptionPlan.swift
-      # For AutoSwitchEngineTests, CLIVersionParsingTests, ClaudeJSONRewriteTests
-      - path: CCSwitcher/Services/AutoSwitchEngine.swift
-      - path: CCSwitcher/Services/ClaudeService.swift
-      - path: CCSwitcher/Services/KeychainService.swift
-      - path: CCSwitcher/Models/Account.swift
-      - path: CCSwitcher/Models/UsageData.swift
-      - path: CCSwitcher/Models/String+Obfuscation.swift
-    dependencies:
-      - package: GRDB
+      - path: Sources
+        excludes:
+          - "App.swift"
+          - "AppModel.swift"
+          - "Prompts.swift"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: me.xueshi.ccswitcher.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.adarshchbs.ccswitcher.tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: ""
 
