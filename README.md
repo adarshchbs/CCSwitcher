@@ -46,8 +46,15 @@ from them. Compared with upstream:
   leave things as they are.
 - **No file logs.** Logging goes through `os.Logger`, with emails, org names
   and UUIDs marked private.
+- **Add account runs Claude Code's own login.** After a confirmation, the app
+  backs up the current login and runs `claude auth login --claudeai` from a
+  fixed path (`~/.local/bin/claude`, `/opt/homebrew/bin/claude` or
+  `/usr/local/bin/claude`), with no shell and a minimal environment. It
+  never reads, logs or shows the CLI's output. It saves the new login only
+  after the profile endpoint confirms its organization.
 - Removed: Sparkle, Aptabase, GRDB, the cost/activity stats, the desktop
-  widget, the in-app login flow, and the translations.
+  widget, upstream's in-app login flow (browser interceptor, URL handling,
+  shell-based CLI lookup), and the translations.
 
 The original code is © 2026 XueshiQiao, under the MIT License (see
 [LICENSE](LICENSE)). This fork keeps the same license.
@@ -101,7 +108,12 @@ coordinate with (no lock, no API for switching accounts):
 
 1. In a terminal, run `claude /login` and pick the first organization. Then
    choose **Save current login…** from the menu and name it.
-2. Run `claude /login` again, pick the other organization, and save that too.
+2. Choose **Add account…**. The app backs up the current login, then your
+   browser opens; pick the other organization there and name the new account
+   when the app asks. The menu shows "Waiting for sign-in in your browser…"
+   with **Cancel sign-in** until you finish (or 10 minutes pass). If you
+   cancel the naming step, the new login stays active but unsaved; **Save
+   current login…** saves it.
 3. Click an account in the menu to switch. If Claude Code sessions are
    running, the app lists them first, because they may keep using the old
    account until you restart them.

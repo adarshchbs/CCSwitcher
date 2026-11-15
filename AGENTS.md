@@ -8,7 +8,8 @@
 
 **Files** (`Sources/`)
 - `App.swift`: `MenuBarExtra` menu and the Settings window. `AppModel.swift`: menu state and actions. `Prompts.swift`: modal alerts.
-- `Switcher.swift`: the only code that changes credentials (save, switch, remove, rename).
+- `Switcher.swift`: the only code that changes credentials (save, switch, add account, remove, rename).
+- `LoginRunner.swift`: Add account's `claude auth login` runner (fixed paths, allowlisted environment, output dropped). Tests use `FakeLoginRunner`; never run the real `claude`.
 - `Keychain/ClaudeItem.swift`: Claude Code's item: reads via `/usr/bin/security`, the switch's critical reads and the write in-process, all in the pinned default keychain. `Keychain/AccountStore.swift`: one Keychain item per saved account (current login plus `previous`).
 - `ClaudeConfig.swift`: the `oauthAccount` block of `~/.claude.json`.
 - `Model/Envelope.swift`: splices `claudeAiOauth` into the item's JSON without touching other bytes.

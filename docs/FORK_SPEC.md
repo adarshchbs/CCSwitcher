@@ -60,7 +60,9 @@ Delete these, along with their tests, localizations and `project.yml` entries:
 - `AutoSwitchEngine`, refresh timers, wake handlers, first-launch auto-capture,
   `refreshBackupInPlace`, `refreshOAuthCredentials`
 - The in-app login flow (BROWSER interceptor, auth URL file, pasteboard copy)
-  and shell-based CLI discovery (`zsh -ilc`)
+  and shell-based CLI discovery (`zsh -ilc`). "Add account" (below) later
+  brought back a much narrower login: no interceptor, no shell, no URL
+  handling (Deviation 15).
 - `FileLogger` and the legacy `~/.ccswitcher/backups.json` migration
 - `CFBundleURLTypes`
 - All localizations except English
@@ -100,6 +102,7 @@ Sources
   Switcher.swift            actor; the only code that mutates credentials
   UsageClient.swift         the only URLSession use in the app
   SessionGuard.swift        detects running Claude Code processes
+  LoginRunner.swift         Add account: finds `claude`, runs `claude auth login`
 ```
 
 Wrap every external dependency (Claude item, account store, config file,
@@ -158,7 +161,67 @@ Menu: "Save current login…"
 4. Store it, keeping the account's old saved login as `previous`. Read the
    item back to confirm it was written.
 
-The user logs in outside the app (`claude /login`). The app only imports.
+The user logs in outside the app (`claude /login`), or with "Add account"
+below. Save only imports.
+
+### Add account
+
+Menu: "Add account…", under "Save current login…". It signs in to another
+organization with Claude Code's own CLI, then saves the result.
+
+1. **Guards.** Rejected while another operation runs or a journal exists,
+   like every other operation. Resolve the `claude` executable (see below);
+   if none is found, abort before anything changes.
+2. **Confirm.** Find the live owner `A` by `organizationUuid` (unknown →
+   "Save the current login first", before any dialog). Ask: "CCSwitcher first
+   backs up your current login (<A>). Your browser opens; choose the
+   organization there. Running Claude sessions keep using the old login until
+   you restart them." Continue / Cancel.
+3. **Back up A.** The switch's steps 2–3 exactly: re-read the live login,
+   require the owner still to be `A`, prove ownership with `verifyOwner`, back
+   up into A's item (keeping `previous`) and read it back. Nothing has changed
+   yet.
+4. **Journal.** Persist `{fromId: A, toId: nil, kind: login, startedAt}`.
+5. **Run the login.** `<claude> auth login --claudeai` as a child process:
+   - **Executable:** the first executable file among `~/.local/bin/claude`,
+     `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`, symlinks resolved.
+     The resolved path is logged (public). No shell, no PATH search.
+   - **Environment:** built from scratch: `HOME`, `USER`, `LOGNAME`,
+     `LANG=en_US.UTF-8`, `TMPDIR`, `PATH=/usr/bin:/bin:/usr/sbin:/sbin`.
+     Nothing is copied from the app's environment, so no browser override
+     reaches the child; the CLI opens the default browser itself.
+   - **I/O:** stdin is `/dev/null`. stdout and stderr are drained and dropped
+     as they arrive (they can carry sign-in URLs or codes): never stored,
+     logged or shown. Only the exit matters.
+   - **Progress:** the menu shows "Waiting for sign-in in your browser…" and
+     "Cancel sign-in", which terminates the process (SIGTERM, then SIGKILL
+     after 5 s). The same happens after 10 minutes.
+6. **Inspect the result**, whatever the exit status. Read the live item and
+   `oauthAccount` (through `security`).
+   - **Refresh token unchanged** (equal to the one just backed up) and
+     `oauthAccount` still names A: sign-in didn't complete. Clear the journal;
+     "Sign-in didn't complete; nothing changed."
+   - **Otherwise prove the new login:** its refresh token must not be another
+     saved account's, its access token must be unexpired, and
+     `GET /api/oauth/profile` with it must name `oauthAccount.organizationUuid`.
+     A different org → `liveLoginMismatch`. No answer (network, 401) or a
+     missing profile → `newLoginUnverified`. Both keep the journal, and the
+     recovery alert follows.
+   - **A saved org:** back the login up into that account (keeping
+     `previous`): "You signed in to <label> again; its saved login was
+     updated."
+   - **A new org:** ask for a label, defaulting to the org name from the
+     profile response, then `organizationName`. Re-read the live login; if it
+     changed while the prompt was open, keep the journal and abort. Save it
+     as a new account. A cancelled (or empty) label leaves the login live and
+     unsaved: clear the journal and say that **Save current login…** will
+     save it.
+   - On success clear the journal. The new account is live, so the icon shows
+     its initial.
+7. **Failure paths.** A process that can't start: clear the journal if the
+   live login is unchanged. Cancel or timeout with the live login unchanged:
+   as "didn't complete". A changed login that can't be verified: journal
+   kept, recovery alert.
 
 ### Switch to account X
 
@@ -243,14 +306,23 @@ organization's. It never fixes anything.
 ### Unfinished switch
 
 A journal present at launch or before any operation means a switch was
-interrupted between steps 4 and 7. Every operation except the two below is
-then refused, and the app shows a recovery alert. Nothing runs on its own.
+interrupted between steps 4 and 7, or an Add account didn't settle. Every
+operation except the two below is then refused, and the app shows a recovery
+alert. Nothing runs on its own. While an operation runs, its own journal is
+not reported as unfinished.
 
 - **Restore <from>:** if the live login provably belongs to `to` (or `from`)
   by the ownership check, back it up to that account first, since it may be
   the only valid copy. If neither can be proven, abort and change nothing.
   Then write from's saved `claudeAiOauth` into the item (same compare and
   write as step 5), write from's profile, verify, and clear the journal.
+  - **Add account journals (`toId == nil`)** try, in order: `from`; the saved
+    account whose org `oauthAccount` names; and, when no saved account has
+    that org, the org itself. The last case is the new, unsaved login: if the
+    profile endpoint proves it, the app asks for a label and saves it as a
+    new account first. Cancelling changes nothing and keeps the journal. If
+    nothing can be proven, abort and change nothing.
+  - Journals written before `kind` existed decode as switches.
 - **I've fixed it:** clear the journal. Nothing else changes.
 
 ### Restore previous saved login
@@ -294,6 +366,7 @@ Claude Account
   Personal            5h 3% · 7d 18%  (as of 14:02)
 ──────────────
 Save current login…
+Add account…
 Refresh usage
 Settings…              (rename / remove accounts)
 ──────────────
@@ -374,6 +447,12 @@ These tests read the source tree:
   `SecItemUpdate` can spawn a process.
 - None of these strings appear: `oauth/token`, `Sparkle`, `Aptabase`,
   `GRDB`, `FileLog`.
+- `Process` appears only in `ClaudeItem.swift` (the `security` runner) and
+  `LoginRunner.swift`. No `NSTask`, `posix_spawn`, `popen`, `system(`, `exec*`
+  or `fork(` anywhere.
+- Only `LoginRunner.swift` sets a child's environment, as exactly
+  `process.environment = command.environment`. It has no shell, no
+  `ProcessInfo`/`getenv`, and the string `BROWSER` appears in no source file.
 
 ## README
 
@@ -513,3 +592,48 @@ Places where the implementation differs from the text above, and why.
       lives in `UsageClient.swift`, which stays the only network code.
     - The status check runs at launch as well as on menu open. It reads, and
       may call the profile endpoint, but never changes anything (Hard rule 2).
+15. **Add account runs `claude auth login`.** The spec deleted the in-app
+    login flow and says Save only imports. "Add account" (see Operations)
+    brings back a narrow one, at the owner's request, because adding a second
+    login by hand (terminal, then Save) was the main chore left. What keeps
+    it inside the hard rules:
+    - It runs only from a click, after a confirmation (Hard rule 2).
+    - No secret goes in argv or the environment: the argv is fixed, and the
+      environment is a six-key allowlist built from scratch (Hard rule 1).
+      The child's output, which can hold sign-in URLs or codes, is dropped
+      unread (Hard rule 8).
+    - The app sends nothing new over the network. The CLI does the OAuth
+      exchange itself; the app still calls only the usage and profile
+      endpoints, and never the token endpoint (Hard rules 3 and 4).
+    - No shell and no PATH search: three fixed candidate paths. The upstream
+      browser interceptor and URL handling stay deleted.
+    - It fails closed: the current login is proven and backed up first, a
+      journal covers the run, and a new login is saved only after the profile
+      endpoint confirms its org.
+
+    Notes on how it was built:
+    - **`Process` outside `security`.** The static check now allows `Process`
+      in `LoginRunner.swift` too, and `.environment` there only (it was banned
+      everywhere by Deviation 11).
+    - **No Settings override for the path.** The task called it optional; the
+      three fixed paths cover the native installer and Homebrew.
+    - **Extra fail-closed checks.** An unchanged refresh token with an
+      `oauthAccount` that no longer names the owner is `liveLoginMismatch`, not
+      "didn't complete". A new login whose refresh token is another saved
+      account's is also `liveLoginMismatch`. If the login changes while the
+      label prompt is open, the journal stays.
+    - **An empty label counts as cancel** (the login stays live and unsaved),
+      rather than `invalidLabel`.
+    - **Recovery can save.** For an Add account journal, "Restore <from>" may
+      ask for a label and add an account before restoring. That is the only
+      way to keep a proven but unsaved login that would otherwise be
+      overwritten.
+    - **`unfinishedSwitch()` returns nil while an operation runs**, so the
+      menu doesn't show the recovery row (or open the alert) for the journal
+      of a sign-in still in progress. Operations still check the journal
+      directly.
+    - **Unverified:** whether `claude auth login --claudeai` behaves with
+      stdin at `/dev/null`, no TTY and this minimal environment. A CLI
+      installed as a script that needs `node` on `PATH` (an npm install
+      behind `/opt/homebrew/bin/claude`) won't start with the fixed `PATH`;
+      the native installer's binary has no such need.
