@@ -61,6 +61,7 @@ targets:
           - "App.swift"
           - "AppModel.swift"
           - "Prompts.swift"
+          - "StatusPanel.swift"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.adarshchbs.ccswitcher.tests

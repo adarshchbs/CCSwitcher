@@ -136,7 +136,7 @@ final class StaticChecksTests: XCTestCase {
             if content.range(of: #"\bProcess\b"#, options: .regularExpression) != nil {
                 users.insert(file.lastPathComponent)
             }
-            for spawn in [#"\bNSTask\b"#, #"\bposix_spawn"#, #"\bpopen\("#, #"\bsystem\("#, #"\bexecv"#, #"\bfork\("#] {
+            for spawn in [#"\bNSTask\b"#, #"\bposix_spawn"#, #"\bpopen\("#, #"(?<!\.)\bsystem\("#, #"\bexecv"#, #"\bfork\("#] {
                 XCTAssertNil(content.range(of: spawn, options: .regularExpression), "\(spawn) in \(file.lastPathComponent)")
             }
         }

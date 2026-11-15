@@ -1,7 +1,7 @@
 import Foundation
 
-/// What the menu shows, as plain values. `StatusMenuController` turns rows
-/// into `NSMenuItem`s; keeping this free of AppKit lets the tests check the
+/// What the menu shows, as plain values. `MenuPanelView` draws the rows
+/// in the glass panel; keeping this free of AppKit and SwiftUI lets the tests check the
 /// wording and which rows appear.
 enum MenuRow: Equatable {
     case header(String)
@@ -218,5 +218,57 @@ enum MenuRows {
 
     static func time(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+// MARK: - Panel layout
+
+/// One piece of the panel: an account card, or a row that stands alone.
+enum MenuBlock: Equatable, Identifiable {
+    case card(AccountCard)
+    case row(MenuRow)
+
+    var id: String {
+        switch self {
+        case .card(let card): "card:\(card.account.id)"
+        case .row(let row): row.key
+        }
+    }
+}
+
+/// An account and the rows that belong to it: its indented notes and its
+/// usage, in menu order.
+struct AccountCard: Equatable {
+    var account: AccountLine
+    /// The account's position among saved accounts. Picks its color.
+    var index: Int
+    var rows: [MenuRow]
+}
+
+extension MenuRows {
+    /// Groups rows into cards: each account takes the usage rows and
+    /// indented notes that follow it. Any other row ends the card.
+    static func blocks(_ rows: [MenuRow]) -> [MenuBlock] {
+        var blocks: [MenuBlock] = []
+        var card: AccountCard?
+        var index = 0
+        for row in rows {
+            switch row {
+            case .account(let line):
+                if let card { blocks.append(.card(card)) }
+                card = AccountCard(account: line, index: index, rows: [])
+                index += 1
+            case .usage where card != nil:
+                card?.rows.append(row)
+            case .note(let line) where card != nil && line.indented:
+                card?.rows.append(row)
+            default:
+                if let finished = card { blocks.append(.card(finished)) }
+                card = nil
+                blocks.append(.row(row))
+            }
+        }
+        if let card { blocks.append(.card(card)) }
+        return blocks
     }
 }

@@ -416,4 +416,32 @@ final class RunningSessionsTests: XCTestCase {
         XCTAssertEqual(line(130).remaining, 0)
         XCTAssertEqual(line(-5).remaining, 100)
     }
+
+    func testBlocksGroupEachAccountsRowsIntoItsCard() {
+        func account(_ id: String) -> MenuRow {
+            .account(AccountLine(id: id, label: id, checked: false, tag: nil, trailing: nil, fetching: false, tooltip: nil))
+        }
+        func usage(_ key: String) -> MenuRow {
+            .usage(UsageLine(key: key, label: "Weekly", percent: 10, severity: .normal, stale: false, tooltip: nil))
+        }
+        func note(_ key: String, indented: Bool) -> MenuRow {
+            .note(NoteLine(key: key, text: key, indented: indented, style: .secondary))
+        }
+        let rows: [MenuRow] = [
+            .header("Claude Account"),
+            account("a"), note("a:sessions", indented: true), usage("a:0"),
+            account("b"), usage("b:0"), note("b:placeholder", indented: true),
+            note("warning", indented: false),
+            .separator("accounts"),
+            .action(ActionLine(action: .fixClaudeJSON, title: "Fix ~/.claude.json")),
+            note("mismatch:undo", indented: true),
+        ]
+        let blocks = MenuRows.blocks(rows)
+        XCTAssertEqual(blocks.map(\.id), ["h:Claude Account", "card:a", "card:b", "n:warning:warning", "s:accounts",
+                                          "x:fixClaudeJSON", "n:mismatch:undo:mismatch:undo"])
+        guard case .card(let first) = blocks[1], case .card(let second) = blocks[2] else { return XCTFail("no cards") }
+        XCTAssertEqual(first.rows.map(\.key), ["n:a:sessions:a:sessions", "u:a:0"])
+        XCTAssertEqual(second.rows.map(\.key), ["u:b:0", "n:b:placeholder:b:placeholder"])
+        XCTAssertEqual([first.index, second.index], [0, 1])
+    }
 }
