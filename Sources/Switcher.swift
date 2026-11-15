@@ -97,6 +97,27 @@ actor Switcher {
         }
     }
 
+    /// A token per account for reading usage: the live item's for the
+    /// active account, the saved item's for the others. Accounts whose token
+    /// can't be read are left out and show as unavailable.
+    func usageTokens() throws -> [String: UsageToken] {
+        guard !busy else { throw SwitchError.busy }
+        let owner = try liveOwner()
+        var tokens: [String: UsageToken] = [:]
+        for account in try loadAccounts() {
+            do {
+                let login = account.id == owner?.id
+                    ? try OAuthLogin(raw: Envelope(item.read()).claudeAiOauth())
+                    : try StoredLogin(decoding: store.read(id: account.id)).login()
+                tokens[account.id] = UsageToken(accessToken: login.accessToken, expiresAt: login.expiresAt)
+            } catch let error where error is ClaudeItem.Failure || error is AccountStore.Failure
+                        || error is Envelope.Failure || error is StoredLogin.Failure || error is DecodingError {
+                log.notice("No usage token for \(account.id, privacy: .public): \(self.describe(error), privacy: .public)")
+            }
+        }
+        return tokens
+    }
+
     // MARK: - Save current login
 
     /// Imports the login Claude Code is using now. Updates the saved account
