@@ -197,6 +197,12 @@ final class GlassPanel: NSPanel {
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.cornerRadius = Self.cornerRadius
+            // Smoky in dark mode, milky in light mode: without a tint the
+            // glass goes flat grey over a window of the other appearance.
+            glass.tintColor = NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(white: 0.08, alpha: 0.55) : NSColor(white: 1, alpha: 0.5)
+            }
             glass.contentView = view
             contentView = glass
         } else {

@@ -1,19 +1,35 @@
+import AppKit
 import SwiftUI
 
-/// Each saved account's color, by its position in the list. Muted so the
-/// glass shows through; it marks the account's initial, its bars and, when
-/// active, its card. Orange and red stay reserved for low limits and
+/// Each saved account's color, by its position in the list. Each hue has a
+/// deeper tone for light mode and a brighter one for dark mode, so it keeps
+/// its color on grey glass. It marks the account's initial, its bars and,
+/// when active, its card. Orange and red stay reserved for low limits and
 /// warnings.
 enum AccountPalette {
     static let colors: [Color] = [
-        Color(red: 0.42, green: 0.48, blue: 0.96),  // indigo
-        Color(red: 0.18, green: 0.66, blue: 0.62),  // teal
-        Color(red: 0.89, green: 0.43, blue: 0.57),  // rose
-        Color(red: 0.62, green: 0.47, blue: 0.93),  // violet
+        dynamic(light: 0x4C5BD4, dark: 0x9DA8FF),  // indigo
+        dynamic(light: 0x0F8A7E, dark: 0x5FD4C4),  // teal
+        dynamic(light: 0xC23F6A, dark: 0xFF9EB8),  // rose
+        dynamic(light: 0x7A4FD0, dark: 0xC7A9FF),  // violet
     ]
+
+    /// Text on a solid accent fill.
+    static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x16161A)
 
     static func color(_ index: Int) -> Color {
         colors[index % colors.count]
+    }
+
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            rgb(appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light)
+        })
+    }
+
+    private static func rgb(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
     }
 }
 
@@ -173,12 +189,12 @@ struct AccountCardView: View {
     private var cardShape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
 
     private var fill: Color {
-        if active { return accent.opacity(hovering ? 0.18 : 0.13) }
-        return Color.primary.opacity(hovering ? 0.07 : 0.035)
+        if active { return accent.opacity(hovering ? 0.17 : 0.12) }
+        return Color.primary.opacity(hovering ? 0.10 : 0.06)
     }
 
     private var stroke: Color {
-        active ? accent.opacity(0.35) : Color.clear
+        active ? accent.opacity(0.55) : Color.clear
     }
 
     private var titleRow: some View {
@@ -207,9 +223,9 @@ struct AccountCardView: View {
         let initial = card.account.label.first.map { String($0).uppercased() } ?? "?"
         return Text(initial)
             .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(active ? Color.white : accent)
+            .foregroundStyle(active ? AccountPalette.onAccent : accent)
             .frame(width: 22, height: 22)
-            .background(Circle().fill(active ? accent.opacity(0.9) : accent.opacity(0.18)))
+            .background(Circle().fill(active ? accent : accent.opacity(0.22)))
             .accessibilityHidden(true)
     }
 }
@@ -224,7 +240,7 @@ struct TagView: View {
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 1.5)
-            .background(Capsule().fill(color.opacity(0.15)))
+            .background(Capsule().fill(color.opacity(0.2)))
             .lineLimit(1)
             .fixedSize()
     }
@@ -241,7 +257,7 @@ struct UsageBarRow: View {
 
     private var barColor: Color {
         switch line.severity {
-        case .normal: accent.opacity(0.85)
+        case .normal: accent
         case .warning: Color.orange.opacity(0.9)
         case .critical: Color.red.opacity(0.9)
         }
@@ -256,7 +272,7 @@ struct UsageBarRow: View {
                 .frame(width: 88, alignment: .leading)
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule().fill(Color.primary.opacity(0.12))
                     if line.remaining > 0 {
                         Capsule()
                             .fill(barColor)
