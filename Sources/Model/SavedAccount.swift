@@ -14,6 +14,12 @@ struct SavedAccount: Codable, Identifiable, Equatable, Sendable {
     var plan: String?
 }
 
+extension SavedAccount {
+    init(id: String, label: String, email: String, orgUuid: String) {
+        self.init(id: id, label: label, email: email, orgUuid: orgUuid, orgName: nil, plan: nil)
+    }
+}
+
 extension Array where Element == SavedAccount {
     /// The saved account that owns a login from organization `orgUuid`, or nil
     /// when no saved account matches. More than one match is treated as no

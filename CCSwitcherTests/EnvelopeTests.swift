@@ -98,8 +98,3 @@ final class OwnerDetectionTests: XCTestCase {
     }
 }
 
-private extension SavedAccount {
-    init(id: String, label: String, email: String, orgUuid: String) {
-        self.init(id: id, label: label, email: email, orgUuid: orgUuid, orgName: nil, plan: nil)
-    }
-}
