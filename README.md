@@ -23,13 +23,12 @@
 
 ## Install
 
-Paste this into Claude Code or Codex on your Mac:
+Copy the [install prompt](#install-prompt) at the bottom of this page and paste it into Claude Code or Codex. It's plain text with every command spelled out, so you can read exactly what the agent will run.
 
-```text
-Install CCSwitcher on this Mac by following https://raw.githubusercontent.com/adarshchbs/CCSwitcher/manual-switch-hardened/docs/INSTALL.md
-```
-
-The agent builds the app from source, runs the tests and tells you how to save your first two logins.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/install-dark.svg">
+  <img src="docs/assets/install-light.svg" width="100%" alt="The install prompt's six steps: check the Mac, clone this repo, run the tests on a throwaway keychain, build, install to ~/Applications, hand off. It reaches only GitHub and, if xcodegen is missing, Homebrew. It never touches ~/.claude.json, ~/.claude/, the Claude Code-credentials Keychain item, or your Claude sign-ins.">
+</picture>
 
 ## What one click does
 
@@ -167,6 +166,94 @@ Claude Code offers no lock or switching API, so these remain:
 - **`~/.claude.json` race.** A write Claude Code makes between the app's last check and its rename is lost.
 - **Running sessions keep the old login** and can write it back when their token refreshes. The panel warns you; restart them.
 - **The ownership check trusts Anthropic's profile endpoint** when the token matches no saved login. If it's unreachable, the app refuses to save or switch.
+
+</details>
+
+## Install prompt
+
+Paste all of this into Claude Code or Codex. Paste it again later to update; saved logins survive a reinstall.
+
+```text
+Install CCSwitcher, a macOS menu bar app that switches Claude Code between
+saved logins. Build it from source, install it to ~/Applications, then hand
+off to me.
+
+Ground rules
+- My Claude logins are mine. Leave ~/.claude.json, ~/.claude/ and the
+  Keychain item "Claude Code-credentials" exactly as you found them. I run
+  every Claude sign-in myself, from the app's menu.
+- Network: git clone/fetch from github.com/adarshchbs/CCSwitcher, and
+  brew install xcodegen if it is missing. Nothing else.
+- Run the steps in order. Each ends on a check. If a check fails, stop and
+  show me the command and the last 20 lines of its output.
+
+1. Check the Mac. All four must pass:
+   - sw_vers -productVersion: 14.0 or later.
+   - xcodebuild -version: Xcode 26 or later (the glass panel needs the
+     macOS 26 SDK). If it points at the Command Line Tools, ask me to
+     install Xcode, open it once, then run:
+       sudo xcode-select -s /Applications/Xcode.app
+   - brew --version: prints a version.
+   - At least one of these exists (Add account runs claude from them only):
+       ~/.local/bin/claude  /opt/homebrew/bin/claude  /usr/local/bin/claude
+
+2. Get the source. The fork is on branch manual-switch-hardened; main
+   holds upstream's code. If ~/CCSwitcher is already a clone:
+     git -C ~/CCSwitcher fetch origin
+     git -C ~/CCSwitcher checkout manual-switch-hardened
+     git -C ~/CCSwitcher pull --ff-only
+   Otherwise:
+     git clone --branch manual-switch-hardened \
+       https://github.com/adarshchbs/CCSwitcher.git ~/CCSwitcher
+   Check: the branch is manual-switch-hardened and git status is clean.
+
+Run steps 3 to 6 from ~/CCSwitcher.
+
+3. Generate the Xcode project:
+     command -v xcodegen || brew install xcodegen
+     xcodegen generate
+   Check: CCSwitcher.xcodeproj exists.
+
+4. Run the tests:
+     xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher \
+       -derivedDataPath build test
+   They use a throwaway keychain in a temp directory and never open a
+   dialog. If a Keychain password dialog appears, tell me to click Deny,
+   then stop.
+   Check: the output ends with ** TEST SUCCEEDED **.
+
+5. Build the app:
+     xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher \
+       -configuration Release -derivedDataPath build build
+   Check: the output ends with ** BUILD SUCCEEDED **.
+
+6. Install and launch. Quit a running copy with pkill; osascript's quit
+   fails with error -128 for this menu bar app.
+     pkill -x CCSwitcher || true
+     ditto build/Build/Products/Release/CCSwitcher.app \
+       ~/Applications/CCSwitcher.app
+     open ~/Applications/CCSwitcher.app
+   Check: pgrep -x CCSwitcher prints a PID, and shasum prints the same
+   hash for Contents/MacOS/CCSwitcher in both copies of the app.
+
+7. Hand off. Tell me the commit (git rev-parse --short HEAD), then:
+   a. Click the person icon in the menu bar to open CCSwitcher.
+   b. With claude signed in to my first organization, choose
+      Save current login... and name it, for example Team.
+   c. Choose Add account..., pick the other organization in the browser,
+      and name it, for example Personal.
+   d. Click an account to switch. When macOS asks about
+      "Claude Code-credentials" or "CCSwitcher saved login", choose
+      Always Allow. The app is signed ad hoc, so it asks again after each
+      rebuild.
+   e. After a switch, restart Claude Code, or quit and reopen T3 Code.
+      Running sessions keep the old login until they restart.
+```
+
+<details>
+<summary><b>Uninstall</b></summary>
+
+Remove each account in **Settings…** first, which deletes its saved login. Then quit CCSwitcher and move `~/Applications/CCSwitcher.app` to the Trash. Logins left behind stay in the login keychain under the service `com.adarshchbs.ccswitcher.account`, where Keychain Access can delete them.
 
 </details>
 

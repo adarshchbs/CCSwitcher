@@ -1,7 +1,7 @@
 """Draws the README's two "how it works" diagrams as SVG, light and dark.
 
 Run from the repo root: python3 scripts/diagrams.py
-Writes docs/assets/{switch,sessions}-{light,dark}.svg. The colors match the
+Writes docs/assets/{switch,sessions,install}-{light,dark}.svg. The colors match the
 app's account palette: indigo for the first account, teal for the second.
 """
 
@@ -13,10 +13,10 @@ FONT = '-apple-system, BlinkMacSystemFont, &quot;SF Pro Text&quot;, &quot;Segoe 
 MONO = 'ui-monospace, &quot;SF Mono&quot;, Menlo, Consolas, monospace'
 
 THEMES = {
-    "light": dict(canvas="#F6F7FB", card="#FFFFFF", edge="#E1E4EC", ink="#1D2030", muted="#646B80",
+    "light": dict(rose="#C23F6A", rosefill="#FBEAF0", canvas="#F6F7FB", card="#FFFFFF", edge="#E1E4EC", ink="#1D2030", muted="#646B80",
                   line="#B4BAC8", team="#4C5BD4", teamfill="#ECEEFC", personal="#0F8A7E",
                   personalfill="#E1F3F0", warn="#B4690E", warnfill="#FFF3E2", onaccent="#FFFFFF"),
-    "dark": dict(canvas="#151A24", card="#1E2431", edge="#2E3646", ink="#E8EBF3", muted="#9AA1B5",
+    "dark": dict(rose="#FF9EB8", rosefill="#3A1F2A", canvas="#151A24", card="#1E2431", edge="#2E3646", ink="#E8EBF3", muted="#9AA1B5",
                  line="#4A5366", team="#9DA8FF", teamfill="#262C4A", personal="#5FD4C4",
                  personalfill="#163431", warn="#F2B45A", warnfill="#3A2E1C", onaccent="#16161A"),
 }
@@ -198,9 +198,58 @@ def sessions_diagram():
     return 900, 468, "".join(parts), "After a switch: running sessions keep the old login until restarted"
 
 
+# ---------------------------------------------------------------- install
+
+
+def install_diagram():
+    parts = []
+    steps = [
+        ("Check the Mac", "macOS, Xcode, brew"),
+        ("Clone", "this repo, from GitHub"),
+        ("Test", "throwaway keychain"),
+        ("Build", "Release, ad hoc signed"),
+        ("Install", "~/Applications"),
+        ("Hand off", "you save your logins"),
+    ]
+    x0, gap, y = 40, 140, 58
+    parts.append(f'<line x1="{x0 + 14}" y1="{y}" x2="{x0 + 14 + gap * 5}" y2="{y}" stroke="{{line}}" stroke-width="1.5"/>')
+    for i, (title, sub) in enumerate(steps):
+        x = x0 + 14 + gap * i
+        last = i == len(steps) - 1
+        fill, stroke, ink = ("personal", "personal", "onaccent") if last else ("card", "line", "ink")
+        parts.append(f'<circle cx="{x}" cy="{y}" r="14" fill="{{{fill}}}" stroke="{{{stroke}}}" stroke-width="1.5"/>')
+        parts.append(text(x, y + 4.5, str(i + 1), 13, ink, 600, "middle"))
+        parts.append(text(x - 14, y + 40, title, 14, "ink", 600))
+        parts.append(text(x - 14, y + 58, sub, 12, "muted"))
+
+    def card(x, title, color, fill, mark, items):
+        out = [f'<rect x="{x}" y="150" width="400" height="150" rx="12" fill="{{card}}" stroke="{{edge}}"/>',
+               f'<rect x="{x}" y="150" width="400" height="38" rx="12" fill="{{{fill}}}"/>',
+               f'<rect x="{x}" y="176" width="400" height="12" fill="{{{fill}}}"/>',
+               text(x + 18, 175, title, 13.5, color, 600)]
+        for j, (item, mono) in enumerate(items):
+            iy = 214 + j * 24
+            out.append(text(x + 20, iy, mark, 13, color, 700))
+            out.append(text(x + 40, iy, item, 12.5, "ink", 400, mono=mono))
+        return "".join(out)
+
+    parts.append(card(40, "Reaches the network for", "personal", "personalfill", "✓", [
+        ("github.com/adarshchbs/CCSwitcher (git clone)", False),
+        ("Homebrew, only if xcodegen is missing", False),
+        ("Nothing else", False),
+    ]))
+    parts.append(card(460, "Never touches", "rose", "rosefill", "✕", [
+        ("~/.claude.json", True),
+        ("~/.claude/", True),
+        ("Keychain item Claude Code-credentials", False),
+        ("Your Claude sign-ins: you run them", False),
+    ]))
+    return 900, 330, "".join(parts), "What the install prompt does: six steps, the network it uses, and what it never touches"
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, build in [("switch", switch_diagram), ("sessions", sessions_diagram)]:
+    for name, build in [("switch", switch_diagram), ("sessions", sessions_diagram), ("install", install_diagram)]:
         width, height, body, title = build()
         for theme, colors in THEMES.items():
             path = OUT / f"{name}-{theme}.svg"
